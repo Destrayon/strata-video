@@ -1965,7 +1965,8 @@ def fork_vision(eng: Path, vision: str, llama, gpu=None) -> str:
             bdir = ROOT / "build-vision-gpu"
             cmake_build(ROOT / "tools" / "vision", bdir, "strata-vision",
                         [f"-DLLAMA_DIR={llama}", "-DSTRATA_VISION_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={arch}",
-                         f"-DCMAKE_CUDA_COMPILER={nvcc}"], vcvars, "build-vision-gpu.bat", vargs)
+                         f"-DCMAKE_CUDA_COMPILER={Path(nvcc).as_posix()}"],   # CMake reads \ as an escape
+                        vcvars, "build-vision-gpu.bat", vargs)
             shutil.copy2(bdir / "bin" / VEXE, eng / VEXE)
             (eng / "BUILD.json").write_text(json.dumps({**meta, "vision": "gpu", "vision_src": vsrc,
                                                         "vision_archs": [arch]}, indent=1))
