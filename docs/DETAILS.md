@@ -961,44 +961,63 @@ crashes when told to accept it); otherwise for the CPU. `--build` compiles the e
 **Web page:** with videos on, the chat's attach button (or dropping a file on the chat) takes a video as well (up to
 200 MB); it plays in the message and goes to the server as a `video_url` part.
 
-A video becomes what llama.cpp's `mtmd` makes of it for this model: frames sampled by ffmpeg, two consecutive frames
-merged into one temporal patch (the qwen3vl projector), each pair an ordinary image between `<|vision_start|>` and
-`<|vision_end|>` - its own M-RoPE time step, rows and columns - after a `Video:` label, with a `[0m5.00s]` timestamp
-every 5 seconds. The engine reads it like that many pictures, unchanged. (As in llama.cpp, a timestamp follows the
-frame it marks, so the first frame is a pair of its own.)
+A video is laid out as the Qwen3-VL processor in transformers lays it out (`processing_qwen3_vl.py`): frames sampled
+by ffmpeg, frames 0+1, 2+3, ... merged into one temporal patch each (the qwen3vl projector; an odd last frame is
+doubled), and each pair preceded by its time as text, `<1.2 seconds>` (the pair's mean), then `<|vision_start|>`
+image `<|vision_end|>` - its own M-RoPE time step, rows and columns. The engine reads it like that many pictures,
+unchanged. (llama.cpp's own video helper writes a `Video:` label and a `[0m5.00s]` timestamp every 5 s after the
+frame it marks, which leaves frame 0 unpaired and shifts every label; the first version of this fork used it, and
+its answers placed events about 1 s late.)
 
 | `"vision"` key | Default | What it does |
 | --- | --- | --- |
 | `video_fps` | 2 | frames sampled per second |
 | `video_max_frames` | 32 | a longer video is sampled more sparsely, so the frames still cover all of it (0: no cap) |
-| `video_max_side` | 448 | frames are shrunk to this longer side first (0: as decoded, up to `max_tokens` per pair) |
-| `video_timestamp_ms` | 5000 | a timestamp every this many ms (0: none) |
+| `video_tokens` | 448 | each frame is sized so a pair is about this many tokens (one token per 32x32 pixels; 448 = 896x504 at 16:9) |
+| `video_total_tokens` | 12,288 | the whole video's budget (Qwen3-VL's shipped default): more frames lower the per-pair size, to at least 64 |
+| `video_max_side` | 0 | an extra cap on the frames' longer side (0: none) |
 
-A request can set `fps`, `max_frames` and `max_side` for one video. Encoding llama.cpp's 10-second test clip
-(`tools/mtmd/test-3.mp4`, 720x358), ffmpeg decoding included, on the CPU (i9-13900K, 16 threads) and on the GPU (RTX
-5070 Ti, the encoder built with CUDA 12.8 for sm_120):
+A request can set `fps`, `max_frames`, `tokens` and `max_side` for one video. `"max_tokens"` in the `"vision"`
+section caps every frame pair as it caps a picture (setup sets 1,024 for a GPU encoder, 300 for the CPU one).
+
+**Reading text** (HUDs, subtitles, signs), measured on a 12-second 1080p clip drawn for it: a busy background, a
+20 px HUD (`HP 87 AMMO 23/90`, changing to `HP 41 AMMO 7/90` at 6 s), an 18 px sign, three 28 px subtitles changing
+at 0/4/8 s. IQ2_XS, GPU encoder, thinking off, answers checked by hand:
+
+| Settings | Subtitles word for word | HUD values | HUD change (6 s) | Sign | Prompt tokens |
+| --- | ---: | ---: | --- | --- | ---: |
+| first version: 448 px side (~100 tokens/pair), llama.cpp timestamps | 0/3 | 1/4 | - | wrong | 1,555 |
+| first version: 1 fps, 896 px side | 3/3 | 3/4 | 5-6 s | right | 3,673 |
+| now, defaults (2 fps, 448 tokens/pair) | 3/3, at 0/4/8 s | 2/4 | 5 s | right | 5,517 |
+| now, `tokens` 768 | 3/3, at 0/4/8 s | 4/4 | 4-5 s | right | 9,465 |
+| now, `fps` 1, `tokens` 1024 | 3/3, at 0/4/8 s | **4/4** | **6 s** | right | 4,754 |
+
+For small text, ask for `"fps": 1, "tokens": 1024`: fewer frames, each one sharp. The same clip with a plain
+background: the defaults read everything and placed the HUD change at 6 s (the first version: 7 s, and one misread).
+
+Encoding llama.cpp's 10-second test clip (`tools/mtmd/test-3.mp4`, 720x358) with the first version's settings,
+ffmpeg decoding included, on the CPU (i9-13900K, 16 threads) and on the GPU (RTX 5070 Ti, the encoder built with
+CUDA 12.8 for sm_120):
 
 | Settings | Frames | Frame pairs | Tokens | CPU | GPU |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 2 fps, 448 px (the defaults) | 20 | 11 | 1,078 | 6.5 s | 0.74 s |
+| 2 fps, 448 px | 20 | 11 | 1,078 | 6.5 s | 0.74 s |
 | 6-frame cap | 6 | 4 | 392 | 2.3 s | 0.42 s |
 | 1 fps, full 720 px | 10 | 5 | 1,265 | 7.6 s | 0.71 s |
 | 1 fps, 896 px (`max_tokens` 1,024) | 10 | 6 | 1,518 | - | 0.78 s |
 
-At 448 px a 16:9 frame pair is 98 tokens; the 32-frame default stays under ~1,800 tokens for any length.
-
-**Text in a video** (subtitles, screens, signs) needs more pixels than the defaults keep: 448 px shrinks a 1080p
-frame 4.3x, and each token covers 32x32 of those pixels. For text, send a larger `max_side` (896) with a lower `fps`,
-and raise `"max_tokens"` in the `"vision"` section (setup sets 1,024 for a GPU encoder, 300 for the CPU one, and the
-cap applies to every frame pair). For one frame full of text, a picture of it reads best. Not measured yet.
-
-Answers (IQ2_XS, RTX 5070 Ti 16 GB, 64K context, encoder on the CPU, thinking off, the same clip at the defaults: a
-1,149-token prompt). Asked to describe it in order, the model told the scene right - a grinning creature grabs a
+Answers (IQ2_XS, RTX 5070 Ti 16 GB, 64K context, encoder on the CPU, thinking off, the same clip at the first
+version's defaults: a 1,149-token prompt). Asked to describe it in order, the model told the scene right - a grinning creature grabs a
 terrified man in a barbershop, he falls and scrambles, grabs a gun from a table, is caught again - in **14.0 s** for
 the whole request (encoding included). Asked what lies on the counter near the end and when, it answered "a
 revolver ... at approximately the 7-second mark" (it is in view from ~6 s) in **2.5 s**: the video came from the
 cache. With the GPU encoder the first question took **6.4 s** for the whole request (again right: a sharp-toothed
-creature, the fall, the chase, caught by the neck), and at 1 fps / 896 px (1,579 prompt tokens) **3.9 s**.
+creature, the fall, the chase, caught by the neck), and at 1 fps / 896 px (1,579 prompt tokens) **3.9 s**. With the
+Qwen3-VL layout and the new defaults (2,645 prompt tokens) the revolver "first appears at the 6-second mark", in
+**2.7 s**.
+
+For game QA, see [the research notes](research/video-game-qa-vlm-2026-10-04.md): these models catch glitches visible
+in one frame far better than ones that only show across frames, and work best as a filter for human review.
 
 **OpenAI API** (a `video_url` part: a `data:` URL, an `http(s)://` URL or a local file path):
 
