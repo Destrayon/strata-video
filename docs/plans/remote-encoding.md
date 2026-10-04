@@ -26,3 +26,10 @@ every image/video part, uploads the embeddings, rewrites the part to a reference
 - Phase 2: `tools/video_proxy.py` (Upstream, Encoder, make_handler: rewrites content parts in messages / input /
   nested content, uploads once, streams, maps its own Origin to the server's), `tools/make_vocab_gguf.py` (output
   byte-identical to the scratch version). `tools/test_video_proxy.py` 5 tests pass.
+- Phase 3: setup `--vision remote` (`remote_vision`: installs as "none", adds `--vision` without a reserve and
+  `"vision": {"remote": true, "upload_dir": ...}`; kept by choices_from_config, not carried into a local encoder).
+  Mocked 2080 Ti + 128 GB install passes; setup picks 32K context there - docs recommend `--context 65536`.
+- Phase 4: this PC, proxy (GPU encoder) + server in remote mode: hard HUD clip answers identical to local encoding,
+  uploads 24 / 28 MB f16; raw video to the server refused with the proxy hint; web page via the proxy answered in
+  11 s. Normal server restored.
+- Phase 5: DETAILS.md "Encoding on one PC, the model on another". Next action: set up the Linux server.

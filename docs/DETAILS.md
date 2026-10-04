@@ -1019,6 +1019,41 @@ Qwen3-VL layout and the new defaults (2,645 prompt tokens) the revolver "first a
 For game QA, see [the research notes](research/video-game-qa-vlm-2026-10-04.md): these models catch glitches visible
 in one frame far better than ones that only show across frames, and work best as a filter for human review.
 
+### Encoding on one PC, the model on another
+
+A server can run the model alone while a PC with a better GPU encodes the pictures and videos. The server is set
+up with `--vision remote`: the engine takes image rows, and there is no encoder, mmproj file or ffmpeg on it and no
+VRAM kept for one. The PC runs `tools/video_proxy.py`. It encodes every picture and video part of a request with
+its own `strata-vision` and uploads the result once (`POST /v1/strata/embeddings`, a bundle: a JSON header plus
+strata-vision's records, in f16 by default). It then replaces the part with an `image_embeddings` /
+`video_embeddings` part naming the upload and forwards the request. Everything else - the web page, streamed
+answers - passes through, so apps and the browser use the proxy's address instead of the server's.
+
+On the server (an RTX 2080 Ti with 128 GB of DDR4, for example: with no encoder all 11 GB go to the model, and the
+RAM holds IQ3_S, the size that matches the full model on the published benchmarks):
+
+```
+./setup.sh --yes --family qwen --model IQ3_S --vision remote --context 65536 --host 0.0.0.0 --api-key <secret>
+```
+
+On the PC with the encoder (an installed Strata: its `strata-<model>.json` names the encoder; otherwise give
+`--exe`, `--mmproj`, `--gpu` and a `--model` made by `tools/make_vocab_gguf.py`, ~11 MB, since the encoder reads only
+the vocabulary):
+
+```
+python tools/video_proxy.py --server http://<server>:8080 --api-key <secret> --config strata-iq2_xs.json
+```
+
+and open `http://127.0.0.1:8090`. The server checks that the encodings fit its model (their width, and the encoder
+file's SHA-256 when its config sets `"mmproj_sha256"`); it keeps uploads in `strata-uploads/`, up to 8 GB
+(`"max_upload_gb"`), and a picture or video already uploaded is not sent again.
+
+Measured on one PC (the RTX 5070 Ti encoding, the server in remote mode beside it), the 12-second HUD clip: the same
+prompts (4,754 / 5,517 tokens) and the same answers as with the encoder in the server, f16 uploads changing
+nothing. The upload is the cost: about 24 MB (1 fps, 1,024 tokens per pair) and 28 MB (the defaults) - a fraction of
+a second on gigabit Ethernet, ~2-3 s at 100 Mbit/s. Through the proxy's web page, a dropped clip was answered in
+11 s.
+
 **OpenAI API** (a `video_url` part: a `data:` URL, an `http(s)://` URL or a local file path):
 
 ```python
