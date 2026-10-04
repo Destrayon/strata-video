@@ -952,8 +952,14 @@ test images.
 ## Videos (strata-video fork)
 
 The same encoder reads videos: it needs nothing more than images, plus **ffmpeg and ffprobe** on `PATH` (or
-`"ffmpeg_dir"` in the `"vision"` section). Beside a ready-made engine, setup compiles this fork's `strata-vision` for
-the CPU (Visual Studio's C++ tools on Windows); `--build` compiles the engine and a GPU encoder instead.
+`"ffmpeg_dir"` in the `"vision"` section). Beside a ready-made engine, setup compiles this fork's `strata-vision`: for
+the GPU (`--vision gpu`) when it finds a CUDA toolkit for the card - **12.8 or newer for an RTX 50** - and a compiler
+nvcc accepts (Visual Studio 2019/2022, or Visual Studio 2026 with the optional "MSVC v143 ... v14.44" toolset,
+component `Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64`: nvcc 12.8 rejects VS 2026's own compiler, and
+crashes when told to accept it); otherwise for the CPU. `--build` compiles the engine too.
+
+**Web page:** with videos on, the chat's attach button (or dropping a file on the chat) takes a video as well (up to
+200 MB); it plays in the message and goes to the server as a `video_url` part.
 
 A video becomes what llama.cpp's `mtmd` makes of it for this model: frames sampled by ffmpeg, two consecutive frames
 merged into one temporal patch (the qwen3vl projector), each pair an ordinary image between `<|vision_start|>` and
@@ -969,23 +975,30 @@ frame it marks, so the first frame is a pair of its own.)
 | `video_timestamp_ms` | 5000 | a timestamp every this many ms (0: none) |
 
 A request can set `fps`, `max_frames` and `max_side` for one video. Encoding llama.cpp's 10-second test clip
-(`tools/mtmd/test-3.mp4`, 720x358) on the CPU (i9-13900K, 16 threads):
+(`tools/mtmd/test-3.mp4`, 720x358), ffmpeg decoding included, on the CPU (i9-13900K, 16 threads) and on the GPU (RTX
+5070 Ti, the encoder built with CUDA 12.8 for sm_120):
 
-| Settings | Frames | Frame pairs | Tokens | Encode |
-| --- | ---: | ---: | ---: | ---: |
-| defaults with an 8-frame cap | 8 | 5 | 490 | - |
-| 2 fps, 448 px | 20 | 11 | 1,078 | 6.5 s |
-| 6-frame cap | 6 | 4 | 392 | 2.3 s |
-| 1 fps, full 720 px | 10 | 5 | 1,265 | 7.6 s |
+| Settings | Frames | Frame pairs | Tokens | CPU | GPU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2 fps, 448 px (the defaults) | 20 | 11 | 1,078 | 6.5 s | 0.74 s |
+| 6-frame cap | 6 | 4 | 392 | 2.3 s | 0.42 s |
+| 1 fps, full 720 px | 10 | 5 | 1,265 | 7.6 s | 0.71 s |
+| 1 fps, 896 px (`max_tokens` 1,024) | 10 | 6 | 1,518 | - | 0.78 s |
 
 At 448 px a 16:9 frame pair is 98 tokens; the 32-frame default stays under ~1,800 tokens for any length.
+
+**Text in a video** (subtitles, screens, signs) needs more pixels than the defaults keep: 448 px shrinks a 1080p
+frame 4.3x, and each token covers 32x32 of those pixels. For text, send a larger `max_side` (896) with a lower `fps`,
+and raise `"max_tokens"` in the `"vision"` section (setup sets 1,024 for a GPU encoder, 300 for the CPU one, and the
+cap applies to every frame pair). For one frame full of text, a picture of it reads best. Not measured yet.
 
 Answers (IQ2_XS, RTX 5070 Ti 16 GB, 64K context, encoder on the CPU, thinking off, the same clip at the defaults: a
 1,149-token prompt). Asked to describe it in order, the model told the scene right - a grinning creature grabs a
 terrified man in a barbershop, he falls and scrambles, grabs a gun from a table, is caught again - in **14.0 s** for
 the whole request (encoding included). Asked what lies on the counter near the end and when, it answered "a
 revolver ... at approximately the 7-second mark" (it is in view from ~6 s) in **2.5 s**: the video came from the
-cache. Not measured yet: the GPU encoder.
+cache. With the GPU encoder the first question took **6.4 s** for the whole request (again right: a sharp-toothed
+creature, the fall, the chase, caught by the neck), and at 1 fps / 896 px (1,579 prompt tokens) **3.9 s**.
 
 **OpenAI API** (a `video_url` part: a `data:` URL, an `http(s)://` URL or a local file path):
 

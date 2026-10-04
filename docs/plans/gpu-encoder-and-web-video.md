@@ -18,3 +18,12 @@
   message), `app.css`, `sprite.svg` (`i-video`), `/health` "videos". Verified in the browser: a dropped clip answered.
 - Phase 3 finding: nvcc 12.8 + VS 2026 fails even with `-allow-unsupported-compiler` (cudafe++ access violation); a
   VS 2022 (v143) toolset is needed.
+- Phase 3 so far: setup's `fork_vision` builds a GPU encoder when nvcc (12.8+ for sm_120) and `find_vcvars_cuda`
+  (VS 2019/2022, or VS 2026 + a 14.3x/14.4x toolset via -vcvars_ver) are found; 5 setup tests pass (f6d4802).
+  Blocked: the VS installer (exit 8006) needs Visual Studio closed (a project was open in it), and 14.43
+  is out of support - add `Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64` instead. Next: that install,
+  then `START-HERE.bat --setup` rebuilds the encoder for the GPU.
+- Phase 3 done: VS 2026 + toolset 14.44 (14.43 is out of support; VS must be closed to modify it), setup built the
+  GPU encoder after one fix (nvcc path with forward slashes, 2a64929); config now `gpu: true`, `max_tokens: 1024`.
+  Encode 0.74 s vs 6.5 s CPU; whole request 6.4 s vs 14.0 s.
+- Phase 4: DETAILS.md - setup requirements, web button, CPU/GPU table, text-in-video note, GPU answer timings.
