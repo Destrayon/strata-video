@@ -2755,7 +2755,7 @@ def write_config(path: Path, cfg: dict):
 SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
                         "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision"})
 SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_RESIDENT_PIN"})   # the "env" entries setup writes
-SETUP_VISION = frozenset({"exe", "mmproj", "model", "gpu", "max_tokens", "threads"})
+SETUP_VISION = frozenset({"exe", "mmproj", "model", "gpu", "max_tokens", "threads", "remote", "upload_dir"})
 
 
 def carry_over(old: dict, cfg: dict) -> list[str]:
@@ -2873,7 +2873,8 @@ def choices_from_config(cfg_path: Path) -> dict:
     return {"family": family, "model": model if model in MODELS else None,
             "context": int(val("--max-context")) if val("--max-context") else None,
             "kv": val("--kv") if val("--kv") in ("int8", "q4_0") else None,
-            "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
+            "vision": ("remote" if vis.get("remote") else "gpu" if vis.get("gpu") else "cpu")
+                      if isinstance(vis, dict) else "none",
             "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else esp_path) if esp_path else "off",
             "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port"), "gpu": cfg.get("gpu"),
             "layer_split": cfg.get("layer_split"), "cuda": 12 if config_toolkit(cfg) == 12 else None,
@@ -3504,7 +3505,7 @@ def use_cuda12(cards, cfg_path: Path, cfg: dict, yes: bool) -> dict:
     cfg["exe"] = str(eng / EXE)
     cfg["cuda"] = 12
     cfg["lib_dirs"] = engine_lib_dirs(eng, 12)
-    if cfg.get("vision") and (eng / VEXE).exists():
+    if cfg.get("vision") and not cfg["vision"].get("remote") and (eng / VEXE).exists():
         cfg["vision"]["exe"] = str(eng / VEXE)
     write_config(cfg_path, cfg)
     ok(f"engine: {eng / EXE} (CUDA 12, experimental)")
@@ -3606,8 +3607,9 @@ def main() -> int:
     ap.add_argument("--kv", choices=["int8", "q4_0", "k8v4"],
                     help="KV cache precision above 8K context: int8 (default), q4_0 (half the memory, a little less "
                          "precise) or k8v4 (hybrid: INT8 K + 4-bit V, 816 B/cell)")
-    ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu"],
-                    help="let the model read images (yes = the encoder on the GPU)")
+    ap.add_argument("--vision", choices=["yes", "no", "none", "gpu", "cpu", "remote"],
+                    help="let the model read images (yes = the encoder on the GPU; remote = pictures and videos "
+                         "arrive encoded from another PC's tools/video_proxy.py: no encoder, mmproj or ffmpeg here)")
     ap.add_argument("--vision-tokens", type=int, metavar="N",
                     help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
@@ -4054,7 +4056,13 @@ def main() -> int:
         kv = ["int8", "q4_0"][int(ask("KV cache?", ["1", "2"], "1", a.yes)) - 1]
     if ctx > 8192:
         ok(f"KV cache: {'8-bit' if kv == 'int8' else '4-bit (Hadamard-rotated)'}")
-    if MODELS[model].get("vision", fam.get("vision")) is False:     # UD-IQ4_XS: images, unlike UD-Q4_K_XL
+    # strata-video: "remote" installs like "none" (no encoder, no mmproj, no VRAM for one); only the engine's --vision
+    # and the config's "vision": {"remote": true} differ, at the end
+    remote_vision = a.vision == "remote"
+    if remote_vision:
+        vision = "none"
+        ok("images and videos: encoded on another PC (--vision remote: run tools/video_proxy.py there)")
+    elif MODELS[model].get("vision", fam.get("vision")) is False:     # UD-IQ4_XS: images, unlike UD-Q4_K_XL
         vision = "none"
         if a.vision not in (None, "no", "none"):
             warn(f"images are not available with {model} yet: off")
@@ -4067,7 +4075,8 @@ def main() -> int:
         say("  Images: the model can also read pictures (screenshots, photos, scanned pages). This adds a 0.9 GB")
         say("  download and keeps ~1.4 GB of VRAM free for the image encoder, so text is a few % slower.")
         vision = "gpu" if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
-    ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
+    if not remote_vision:                              # said above for remote
+        ok("images: " + {"none": "off", "gpu": "on", "cpu": "on (encoder on the CPU)"}[vision])
     # The low-RAM mode's two variants.  resident: the experts the GPU's cache does not hold (and, as far as RAM allows,
     # the ones the prompt path borrows cache room from) are copied from the pack's experts.bin into RAM once, so
     # nothing is read from the SSD while it answers (engine 0.1.30, --resident-experts; the engine falls back to mmap
@@ -4354,6 +4363,8 @@ def main() -> int:
         warn("--kv-streaming on: a context under 64K is not streamed (the attention's window holds all of it): off")
     if budget is not None and not q4_split:   # UD-Q4_K_XL: the experts read from the GGUF in place, the most-used N
         args += ["--resident-budget-gib", f"{budget:g}"]   # GiB kept in RAM (#498: a layer split has no budget)
+    if remote_vision:                                  # the engine takes image rows; no encoder here needs VRAM
+        args += ["--vision"]
     if vision != "none":
         args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
         if vision == "gpu" and a.vram_reserve_mib is None and 0 < gpu.get("vram_gb", 0.0) <= 12.5:
@@ -4432,6 +4443,8 @@ def main() -> int:
                          "gpu": vision == "gpu", "max_tokens": vt}
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
+    elif remote_vision:                                # kept on disk, so they survive a restart of the server
+        cfg["vision"] = {"remote": True, "upload_dir": str(ROOT / "strata-uploads")}
     elif a.vision_tokens is not None:
         warn("--vision-tokens: images are off for this model, so it is not used")
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
@@ -4464,6 +4477,9 @@ def main() -> int:
     say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
     if vision != "none":
         say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
+    if remote_vision:
+        say(f"  Images, videos:   on the PC with the encoder run tools/video_proxy.py --server http://<this PC>:{port}"
+            " and use the proxy's address")
     if a.parallel is None:                             # #465: the opt-in, said once (nothing changes)
         for line in parallel_note(None, [g.get("vram_gb", 0.0) for g in chosen], MODELS[model]["arena_gb"], ctx, kv,
                                   "--kv-resident" in cfg["args"]):

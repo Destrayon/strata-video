@@ -57,3 +57,6 @@ build-vision-cuda12.bat
 
 /.ccache/
 /.rocm-win/
+
+# strata-video: encodings uploaded by tools/video_proxy.py (vision remote)
+/strata-uploads/

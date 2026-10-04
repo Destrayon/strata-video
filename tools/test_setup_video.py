@@ -89,5 +89,37 @@ class ForkVision(unittest.TestCase):
         self.assertIn("images only", out)
 
 
+class RemoteVision(unittest.TestCase):
+    """--vision remote: a server whose pictures and videos arrive encoded from another PC (tools/video_proxy.py)."""
+
+    def install(self, *extra, configs=()):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from test_setup_golden import card, install
+        found = [card(0, "NVIDIA GeForce RTX 2080 Ti", 11.0, "75")]          # the user's server: 11 GB + 128 GB
+        return install(127.8, found, ["--family", "qwen", "--model", "IQ3_S", "--no-start", *extra], configs=configs)
+
+    def test_engine_vision_without_an_encoder(self):
+        code, out, cfg, _ = self.install("--vision", "remote")
+        self.assertEqual(code, 0, out)
+        a = cfg["args"]
+        self.assertEqual(a.count("--vision"), 1)
+        self.assertNotIn("--vram-reserve-mib", a)                           # no encoder needs VRAM here
+        self.assertEqual(cfg["vision"]["remote"], True)
+        self.assertNotIn("exe", cfg["vision"])
+        self.assertNotIn("vision encoder:", out)                             # no mmproj download
+        self.assertIn("video_proxy.py", out)
+
+    def test_choice_kept_and_not_leaked(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "strata-iq3_s.json"
+            p.write_text(json.dumps({"args": ["--vision"], "vision": {"remote": True, "upload_dir": "u"}}))
+            self.assertEqual(setup.choices_from_config(p)["vision"], "remote")
+        new = {"vision": {"exe": "v", "mmproj": "m", "model": "x", "gpu": True, "max_tokens": 1024}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            setup.carry_over({"vision": {"remote": True, "upload_dir": "u", "video_fps": 1}}, new)
+        self.assertNotIn("remote", new["vision"])                            # a local encoder again: not remote
+        self.assertEqual(new["vision"]["video_fps"], 1)                      # the user's own keys still carry over
+
+
 if __name__ == "__main__":
     unittest.main()
