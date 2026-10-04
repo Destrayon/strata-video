@@ -23,3 +23,6 @@ every image/video part, uploads the embeddings, rewrites the part to a reference
 - Phase 1: `serve/embeddings.py` (bundle, EmbeddingStore, lookup, RemoteVision), server.py (`upload_store`, store in
   Vision, `POST /v1/strata/embeddings`, `GET /v1/strata/embeddings/<id>`, `"remote": true`), frontend/responses parts.
   `serve/test_embeddings.py` 8 tests + 148 server tests pass.
+- Phase 2: `tools/video_proxy.py` (Upstream, Encoder, make_handler: rewrites content parts in messages / input /
+  nested content, uploads once, streams, maps its own Origin to the server's), `tools/make_vocab_gguf.py` (output
+  byte-identical to the scratch version). `tools/test_video_proxy.py` 5 tests pass.
