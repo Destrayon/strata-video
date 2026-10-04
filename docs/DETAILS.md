@@ -978,8 +978,14 @@ A request can set `fps`, `max_frames` and `max_side` for one video. Encoding lla
 | 6-frame cap | 6 | 4 | 392 | 2.3 s |
 | 1 fps, full 720 px | 10 | 5 | 1,265 | 7.6 s |
 
-At 448 px a 16:9 frame pair is 98 tokens; the 32-frame default stays under ~1,800 tokens for any length. Not measured
-yet: answers from the full model on video, and the GPU encoder.
+At 448 px a 16:9 frame pair is 98 tokens; the 32-frame default stays under ~1,800 tokens for any length.
+
+Answers (IQ2_XS, RTX 5070 Ti 16 GB, 64K context, encoder on the CPU, thinking off, the same clip at the defaults: a
+1,149-token prompt). Asked to describe it in order, the model told the scene right - a grinning creature grabs a
+terrified man in a barbershop, he falls and scrambles, grabs a gun from a table, is caught again - in **14.0 s** for
+the whole request (encoding included). Asked what lies on the counter near the end and when, it answered "a
+revolver ... at approximately the 7-second mark" (it is in view from ~6 s) in **2.5 s**: the video came from the
+cache. Not measured yet: the GPU encoder.
 
 **OpenAI API** (a `video_url` part: a `data:` URL, an `http(s)://` URL or a local file path):
 
