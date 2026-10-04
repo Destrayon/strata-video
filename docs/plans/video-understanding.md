@@ -45,3 +45,5 @@ image-pad token id, as llama.cpp does (its PLE reads `ple.image_token_id` for ev
   engine; `find_vcvars(any_version)`), tests `serve/test_server.py::VideoParts` (9) and `tools/test_setup_video.py`.
   Verified: 148 server tests + all setup tests pass; the real `Vision` class encodes test-3.mp4 from a path, an http
   URL and a data URL (8-frame cap: 490 cells in 5 records, layout = records). Not yet run: a full model answering.
+- Phase 6: `docs/DETAILS.md` "Videos (strata-video fork)" (keys, measured encode table, API examples; the limits
+  line no longer says "no video"), README bullet. Next action: install a model (~68 GB) and ask about a clip.

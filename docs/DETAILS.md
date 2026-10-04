@@ -7,7 +7,7 @@ New here? Start with the [README](../README.md); installing step by step is in [
 > **On this page:** [Speed](#speed-measured) · [Other GPUs](#other-gpus-estimated) · [Which model?](#which-model) ·
 > [Requirements](#before-you-start) · [Windows](#windows) · [Linux](#linux) · [API](#using-it) ·
 > [MCP tools](#tools-from-mcp-servers) · [MCP server](#manage-strata-from-your-ai-assistant-mcp-server) ·
-> [Images](#images-vision) ·
+> [Images](#images-vision) · [Videos](#videos-strata-video-fork) ·
 > [Troubleshooting](#troubleshooting) · [How it works](#how-it-works)
 
 ---
@@ -685,7 +685,7 @@ persisted across restarts.
 
 **Current limits (v1):** one request at a time unless `"parallel": N` is set (opt-in batch slots, up to N requests
 decoded together: [BATCHING.md](BATCHING.md)), and one conversation cached at a time (switching between two chats
-re-reads the other one unless the opt-in cache above is enabled, or each conversation keeps its own batch slot); images only when set up with them (below); no video. **Temperature / top_p / top_k / min_p /
+re-reads the other one unless the opt-in cache above is enabled, or each conversation keeps its own batch slot); images and [videos](#videos-strata-video-fork) only when set up with images (below). **Temperature / top_p / top_k / min_p /
 seed** are honored per request (OpenAI and Anthropic fields); with the default adaptive expert tier a sampled result
 is not reproducible run to run - for seed-reproducible output add `--adapt-every 100000` (static residency) to the
 engine arguments. The run config's optional `sampling` block sets the defaults for requests that leave the fields out
@@ -948,6 +948,49 @@ run below the long-output speed: the first rounds have no draft yet.)
 Strata puts them where the prompt has `<|image_pad|>` tokens and gives each one its 2-D position (row and column in the
 picture; the model uses interleaved M-RoPE). Answers match llama.cpp's multimodal implementation token for token on our
 test images.
+
+## Videos (strata-video fork)
+
+The same encoder reads videos: it needs nothing more than images, plus **ffmpeg and ffprobe** on `PATH` (or
+`"ffmpeg_dir"` in the `"vision"` section). Beside a ready-made engine, setup compiles this fork's `strata-vision` for
+the CPU (Visual Studio's C++ tools on Windows); `--build` compiles the engine and a GPU encoder instead.
+
+A video becomes what llama.cpp's `mtmd` makes of it for this model: frames sampled by ffmpeg, two consecutive frames
+merged into one temporal patch (the qwen3vl projector), each pair an ordinary image between `<|vision_start|>` and
+`<|vision_end|>` - its own M-RoPE time step, rows and columns - after a `Video:` label, with a `[0m5.00s]` timestamp
+every 5 seconds. The engine reads it like that many pictures, unchanged. (As in llama.cpp, a timestamp follows the
+frame it marks, so the first frame is a pair of its own.)
+
+| `"vision"` key | Default | What it does |
+| --- | --- | --- |
+| `video_fps` | 2 | frames sampled per second |
+| `video_max_frames` | 32 | a longer video is sampled more sparsely, so the frames still cover all of it (0: no cap) |
+| `video_max_side` | 448 | frames are shrunk to this longer side first (0: as decoded, up to `max_tokens` per pair) |
+| `video_timestamp_ms` | 5000 | a timestamp every this many ms (0: none) |
+
+A request can set `fps`, `max_frames` and `max_side` for one video. Encoding llama.cpp's 10-second test clip
+(`tools/mtmd/test-3.mp4`, 720x358) on the CPU (i9-13900K, 16 threads):
+
+| Settings | Frames | Frame pairs | Tokens | Encode |
+| --- | ---: | ---: | ---: | ---: |
+| defaults with an 8-frame cap | 8 | 5 | 490 | - |
+| 2 fps, 448 px | 20 | 11 | 1,078 | 6.5 s |
+| 6-frame cap | 6 | 4 | 392 | 2.3 s |
+| 1 fps, full 720 px | 10 | 5 | 1,265 | 7.6 s |
+
+At 448 px a 16:9 frame pair is 98 tokens; the 32-frame default stays under ~1,800 tokens for any length. Not measured
+yet: answers from the full model on video, and the GPU encoder.
+
+**OpenAI API** (a `video_url` part: a `data:` URL, an `http(s)://` URL or a local file path):
+
+```python
+r = client.chat.completions.create(model="strata", messages=[{"role": "user", "content": [
+    {"type": "video_url", "video_url": {"url": "C:/clips/demo.mp4", "fps": 1}},
+    {"type": "text", "text": "What happens in this video?"}]}])
+```
+
+The Responses API takes `{"type": "input_video", "video_url": ...}`; the Anthropic API a `video` block with a `base64`,
+`url` or `path` source.
 
 ---
 

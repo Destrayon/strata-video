@@ -153,6 +153,8 @@ Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). To add a
   fastest. High is best for hard questions.
 - **Pictures:** say yes to "Images?" in setup. Then click **Picture** in the chat, or attach pictures in your app.
   AMD cards read pictures on Linux through the processor; on Windows they can't yet.
+- **Videos (this fork):** with images on and ffmpeg installed, send a `video_url` part through the API
+  ([details](docs/DETAILS.md#videos-strata-video-fork)).
 - **From your phone or another PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`. Always set a key.
 - **One request at a time:** by default Strata answers one request, and the others wait. To answer several at once,
   set `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). On a 12 GB card this makes each answer slower.
