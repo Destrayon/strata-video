@@ -243,6 +243,151 @@ class ImageMarkers(unittest.TestCase):
             svc.embeddings.path.unlink(missing_ok=True)
 
 
+class VideoParts(unittest.TestCase):
+    """strata-video: a video part becomes its layout - mtmd's text and one <|image_pad|> per frame-pair cell - and its
+    records join the request's embeddings file in prompt order with the images."""
+
+    class FakeVision:
+        def __init__(self, d):
+            self.dir = Path(d)
+            self.img = self.dir / "img.sve"
+            self.img.write_bytes(b"I")
+            self.vid = self.dir / "vid.sve"
+            self.vid.write_bytes(b"VV")
+            self.opts = []
+
+        def encode(self, source):
+            return self.img, 3
+
+        def encode_video(self, source, opts):
+            self.opts.append(opts)
+            # "Video:" (two text ids), then two frame pairs of 2 and 4 cells, each between start/end ids 900/901
+            return self.vid, 6, [[70, 71], [900], 2, [901, 72], [900], 4, [901]]
+
+    def setUp(self):
+        self.tok = ByteTokenizer()
+        self.d = tempfile.TemporaryDirectory()
+        self.vision = self.FakeVision(self.d.name)
+        self.svc = Service(MockEngine(self.tok, "ok", max_context=CTX), self.tok,
+                           ChatTemplate(ROOT / "serve/chat_template.jinja"), vision=self.vision)
+        self.pad = self.tok.encode("<|image_pad|>", parse_special=True)[0]
+        self.vpad = self.tok.encode("<|video_pad|>", parse_special=True)[0]
+        self.start = self.tok.encode("<|vision_start|>", parse_special=True)[0]
+        self.end = self.tok.encode("<|vision_end|>", parse_special=True)[0]
+
+    def tearDown(self):
+        if getattr(self.svc.embeddings, "path", None):
+            Path(self.svc.embeddings.path).unlink(missing_ok=True)
+        self.d.cleanup()
+
+    def test_video_layout_replaces_the_marker(self):
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "what happens?"},
+                                             {"type": "video", "source": "clip.mp4", "options": {"fps": 1}}]}]
+        ids, _, _ = self.svc.prepare(msgs, None, {})
+        self.assertNotIn(self.vpad, ids)
+        self.assertEqual(ids.count(self.pad), 6)
+        i = ids.index(70)
+        self.assertEqual(ids[i:i + 13], [70, 71, 900, self.pad, self.pad, 901, 72, 900] + [self.pad] * 4 + [901])
+        # the template's own <|vision_start|> / <|vision_end|> went with the marker
+        self.assertNotEqual(ids[i - 1], self.start)
+        self.assertNotEqual(ids[i + 13], self.end)
+        self.assertEqual(self.vision.opts, [{"fps": 1}])
+        self.assertEqual(Path(self.svc.embeddings.path).read_bytes(), b"VV")
+
+    def test_images_and_videos_in_prompt_order(self):
+        msgs = [{"role": "user", "content": [{"type": "video", "source": "a.mp4"}, {"type": "image", "source": "x.png"},
+                                             {"type": "video", "source": "b.mp4"}]}]
+        ids, _, _ = self.svc.prepare(msgs, None, {})
+        self.assertEqual(ids.count(self.pad), 6 + 3 + 6)
+        self.assertEqual(Path(self.svc.embeddings.path).read_bytes(), b"VVIVV")
+
+    def test_literal_video_marker_is_text(self):
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "the token <|video_pad|> is text"},
+                                             {"type": "video", "source": "a.mp4"}]}]
+        ids, _, _ = self.svc.prepare(msgs, None, {})
+        self.assertNotIn(self.vpad, ids)
+        literal = self.tok.encode("<|video_pad|> is text")
+        self.assertTrue(any(ids[i:i + len(literal)] == literal for i in range(len(ids))))
+        self.assertEqual(ids.count(self.pad), 6)
+
+    def test_video_without_a_video_encoder(self):
+        self.svc.vision = ImageMarkers.FakeVision(self.d.name)
+        with self.assertRaisesRegex(ValueError, "cannot read videos"):
+            self.svc.prepare([{"role": "user", "content": [{"type": "video", "source": "a.mp4"}]}], None, {})
+        self.svc.vision = None
+        with self.assertRaisesRegex(ValueError, "without the vision encoder.*videos"):
+            self.svc.prepare([{"role": "user", "content": [{"type": "video", "source": "a.mp4"}]}], None, {})
+
+    def test_request_shapes(self):
+        from serve.frontend import anthropic_to_messages, openai_to_messages, videos_of
+        msgs, _, _ = openai_to_messages({"messages": [{"role": "user", "content": [
+            {"type": "video_url", "video_url": {"url": "https://x/a.mp4", "fps": 0.5}},
+            {"type": "video_url", "video_url": "data:video/mp4;base64,AAAA", "max_frames": 8},
+            {"type": "video", "video": "C:/clips/c.mp4"}]}]})
+        self.assertEqual(videos_of(msgs), [("https://x/a.mp4", {"fps": 0.5}),
+                                           ("data:video/mp4;base64,AAAA", {"max_frames": 8}),
+                                           ("C:/clips/c.mp4", {})])
+        msgs, _, _ = anthropic_to_messages({"messages": [{"role": "user", "content": [
+            {"type": "video", "source": {"type": "base64", "media_type": "video/webm", "data": "BBBB"}}]}]})
+        self.assertEqual(videos_of(msgs), [("data:video/webm;base64,BBBB", {})])
+
+    def test_responses_input_video(self):
+        from serve.frontend import videos_of
+        from serve.responses import input_messages
+        msgs = input_messages({"input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "hi"}, {"type": "input_video", "video_url": "https://x/a.mp4", "fps": 4}]}]})
+        self.assertEqual(videos_of(msgs), [("https://x/a.mp4", {"fps": 4})])
+
+    def test_layout_and_options(self):
+        from serve.server import VIDEO_DEFAULTS, Vision
+        self.assertEqual(Vision.parse_layout("T1,2;I98;T3;I4"), [[1, 2], 98, [3], 4])
+        with self.assertRaises(ValueError):
+            Vision.parse_layout("X1")
+        v = Vision.__new__(Vision)
+        v.video = dict(VIDEO_DEFAULTS)
+        self.assertEqual(v.video_options({"fps": "1", "max_frames": 8}),
+                         {**VIDEO_DEFAULTS, "fps": 1.0, "max_frames": 8})
+        for bad in ({"fps": "fast"}, {"fps": 100}, {"max_frames": -1}):
+            with self.assertRaises(ValueError):
+                v.video_options(bad)
+
+    def test_temp_video_removed_when_the_pipe_fails(self):
+        from serve.server import VIDEO_DEFAULTS, Vision
+
+        class Gone:
+            def write(self, _):
+                raise BrokenPipeError("the encoder is gone")
+
+        v = Vision.__new__(Vision)
+        v.dir, v.lock, v.cache, v.video = Path(tempfile.mkdtemp(prefix="strata-vision-test-")), threading.Lock(), {}, \
+            dict(VIDEO_DEFAULTS)
+        v.proc = mock.Mock(stdin=Gone())
+        with mock.patch.object(Vision, "load", return_value=b"mp4"):
+            with self.assertRaises(BrokenPipeError):
+                v.encode_video("x", {})
+        self.assertEqual(list(v.dir.iterdir()), [])
+        v.dir.rmdir()
+
+    def test_encoder_protocol(self):
+        from serve.server import VIDEO_DEFAULTS, Vision
+        v = Vision.__new__(Vision)
+        v.dir, v.lock, v.cache, v.video = Path(tempfile.mkdtemp(prefix="strata-vision-test-")), threading.Lock(), {}, \
+            dict(VIDEO_DEFAULTS)
+        v.proc = mock.Mock()
+        v.proc.stdout.readline.side_effect = ["OK 6 2 4 120\n", "LAYOUT T5;I2;T6;I4\n"]
+        with mock.patch.object(Vision, "load", return_value=b"mp4"):
+            path, n, layout = v.encode_video("x", {"max_frames": 4})
+            again = v.encode_video("x", {"max_frames": 4})          # cached: the encoder is not asked twice
+        line = v.proc.stdin.write.call_args_list[0].args[0]
+        self.assertTrue(line.startswith("ENCV 2 4 448 5000 "), line)
+        self.assertEqual((n, layout), (6, [[5], 2, [6], 4]))
+        self.assertEqual(again, (path, n, layout))
+        self.assertEqual(v.proc.stdin.write.call_count, 1)
+        for p in v.dir.iterdir():
+            p.unlink()
+        v.dir.rmdir()
+
+
 class ThinkTokenizer(ByteTokenizer):
     """The byte tokenizer with the model's reasoning markers as specials that are matched even without parse_special,
     as the real tokenizer does (GGUF token type 4)."""

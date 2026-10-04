@@ -985,13 +985,14 @@ def find_nvcc(below=None):
     return best
 
 
-def find_vcvars():
+def find_vcvars(any_version=False):
     vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Microsoft Visual Studio/Installer/vswhere.exe"
     if not vswhere.exists():
         return None
     # CUDA 13 accepts Visual Studio 2019 and 2022 only: a newer one (2026 = version 18) installed next to them
     # must not be picked ("unsupported Microsoft Visual Studio version"); with only a newer one there is none
-    p = out([str(vswhere), "-latest", "-products", "*", "-version", "[16.0,18.0)", "-requires",
+    # (any_version: a build without CUDA, such as the CPU image encoder, takes any of them)
+    p = out([str(vswhere), "-latest", "-products", "*", "-version", "[16.0,)" if any_version else "[16.0,18.0)", "-requires",
              "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"]).strip()
     v = Path(p) / "VC/Auxiliary/Build/vcvars64.bat" if p else None
     return v if v and v.exists() else None
@@ -1914,16 +1915,36 @@ def hip_vision(asked) -> str:
     return "cpu" if asked == "cpu" else "none"
 
 
-def build_vision_cpu(eng: Path, stamp: Path, meta: dict, llama, vsrc) -> Path:
+def build_vision_cpu(eng: Path, stamp: Path, meta: dict, llama, vsrc, vcvars=None) -> Path:
     """#304: the CPU image encoder beside the HIP engine (tools/vision without CUDA), recorded in its BUILD.json."""
     if not ((eng / VEXE).exists() and meta.get("vision_src") == vsrc):
         say("  Compiling the image encoder (for the CPU) ...")
         cmake_build(ROOT / "tools" / "vision", ROOT / "build-vision", "strata-vision",
-                    [f"-DLLAMA_DIR={llama}", "-DSTRATA_VISION_CUDA=OFF"], None, "")
+                    [f"-DLLAMA_DIR={llama}", "-DSTRATA_VISION_CUDA=OFF"], vcvars, "build-vision.bat")
         shutil.copy2(ROOT / "build-vision" / "bin" / VEXE, eng / VEXE)
     stamp.write_text(json.dumps({**meta, "vision": "cpu", "vision_src": vsrc}, indent=1))
     ok(f"engine: {eng / EXE}, image encoder (CPU): {eng / VEXE}")
     return eng
+
+
+def fork_vision(eng: Path, vision: str, llama) -> str:
+    """strata-video: the ready-made encoder predates videos (strata-vision ENCV), so this fork's own encoder is
+    compiled beside the ready-made engine - for the CPU, which needs no CUDA toolkit; `--build` compiles the engine
+    and a GPU encoder here instead.  Without a compiler the ready-made encoder stays: images work, videos do not."""
+    meta = json.loads((eng / "BUILD.json").read_text())
+    vsrc = source_hash(VISION_SOURCES)
+    if vision == "none" or meta.get("vision_src") == vsrc:
+        return vision
+    vcvars = find_vcvars(any_version=True) if WIN else None
+    if WIN and vcvars is None:
+        warn("videos need this fork's image encoder, compiled with Visual Studio's C++ tools (none found): images "
+             "only for now")
+        return vision
+    if vision == "gpu":
+        warn("the video-capable image encoder runs on the CPU beside the ready-made engine (setup --build compiles "
+             "one for your GPU)")
+    build_vision_cpu(eng, eng / "BUILD.json", meta, llama, vsrc, vcvars)
+    return "cpu"
 
 
 # ------------------------------------------------------------------------------------------------ the engine
@@ -4114,6 +4135,7 @@ def main() -> int:
             eng = None
         else:
             vision = prebuilt_vision(json.loads((eng / "BUILD.json").read_text()), gpu, vision)
+            vision = fork_vision(eng, vision, llama)
     if eng is None:
         eng = build_engine_hip(gpu, llama, vision) if hip else build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk)
     meta = json.loads((eng / "BUILD.json").read_text())

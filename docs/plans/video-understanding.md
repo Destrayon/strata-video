@@ -39,3 +39,9 @@ image-pad token id, as llama.cpp does (its PLE reads `ple.image_token_id` for ev
   Upstream quirk kept: the timestamp text follows its frame, so frame 0 is unpaired. Test model: a tensor-less
   GGUF built from the IQ2_XS shard-1 header (`vocab-only.gguf`, outside the repository).
   Build: VS 2026's own CMake + Ninja (the pip `ninja` on PATH is broken). Next: the server's video parts.
+- Phase 5: `serve/frontend.py` (video parts -> `{"type": "video", "source", "options"}`, `videos_of`),
+  `serve/responses.py` (`input_video`), `serve/server.py` (`Vision.encode_video`, `VIDEO_DEFAULTS`, prompt splicing in
+  `prepare`, "video" modality), `setup.py` (`fork_vision`: the fork's encoder compiled for the CPU beside a ready-made
+  engine; `find_vcvars(any_version)`), tests `serve/test_server.py::VideoParts` (9) and `tools/test_setup_video.py`.
+  Verified: 148 server tests + all setup tests pass; the real `Vision` class encodes test-3.mp4 from a path, an http
+  URL and a data URL (8-frame cap: 490 cells in 5 records, layout = records). Not yet run: a full model answering.
