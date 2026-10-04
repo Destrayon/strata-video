@@ -84,6 +84,8 @@ def _content(content, param):
                 raise ResponsesError("only videos given as video_url (a data: or http(s) URL) are supported; "
                                      "this server keeps no files", f"{param}[{j}]", "unsupported_parameter")
             parts.append(dict(part, type="input_video"))
+        elif kind in ("image_embeddings", "video_embeddings"):   # encoded on another PC (strata-video)
+            parts.append(part)
         else:
             raise ResponsesError(f"content parts of type {kind!r} are not supported (text, images and videos are)",
                                  f"{param}[{j}].type", "unsupported_parameter")

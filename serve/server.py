@@ -63,6 +63,7 @@ from serve import runconfig  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
+from serve import embeddings  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 
 IM_END = "<|im_end|>"
@@ -74,6 +75,7 @@ VISION_END = "<|vision_end|>"
 # ~100 tokens lost it on a busy background), and at most ~12,288 tokens for the whole video (Qwen3-VL's shipped
 # video budget), which lowers the per-pair size when more frames are asked for; max_side 0 = no extra cap
 VIDEO_DEFAULTS = {"fps": 2.0, "max_frames": 32, "max_side": 0, "tokens": 448, "total_tokens": 12288}
+UPLOAD_MAX = 2 << 30          # one encoded picture or video sent by another PC (f16: ~28 MB for a 12 s clip)
 # #458: the trailing effort turn ("effort_position": "end"); low is the template's own sentence, medium (which the
 # template says nothing for: no xhigh sentence is medium there) says it, since the xhigh one stays at the top
 EFFORT_TURN = "<|im_start|>system\n{}<|im_end|>\n"
@@ -1271,6 +1273,14 @@ class StrataEngine:
                 self.progress, self.last = None, {}
 
 
+def upload_store(vcfg: dict, tmp: Path) -> embeddings.EmbeddingStore:
+    """Where uploaded encodings are kept: the vision entry's "upload_dir" (they then survive a restart), else beside
+    the encoder's temporary files; "max_upload_gb" caps it (default 8)."""
+    d = Path(vcfg["upload_dir"]) if vcfg.get("upload_dir") else tmp / "uploads"
+    return embeddings.EmbeddingStore(d, int(float(vcfg.get("max_upload_gb", 8)) * (1 << 30)), vcfg.get("n_embd"),
+                                     vcfg.get("mmproj_sha256"))
+
+
 class Vision:
     """The resident image encoder: `strata-vision` (llama.cpp mtmd + the mmproj file) reads `ENC <image> <out>`
     lines and writes each image's embeddings; results are cached by the image's hash, so a conversation that
@@ -1288,6 +1298,7 @@ class Vision:
             args += ["--ffmpeg-dir", str(cfg["ffmpeg_dir"])]
         self.video = {k: cfg.get("video_" + k, v) for k, v in VIDEO_DEFAULTS.items()}
         self.dir = Path(tempfile.mkdtemp(prefix="strata-vision-"))
+        self.store = upload_store(cfg, self.dir)         # pictures and videos another PC encoded (serve/embeddings.py)
         self.spawn = (args, log, env)                   # to start it again after an unload
         self.stopped = False
         self._start()
@@ -1363,6 +1374,9 @@ class Vision:
 
     def encode(self, source: str) -> tuple[Path, int]:
         """-> (embeddings file, number of image tokens)."""
+        hit = embeddings.lookup(getattr(self, "store", None), source, "image")
+        if hit:
+            return hit
         data = self.normalize(self.load(source))
         key = hashlib.sha256(data).hexdigest()[:32]
         with self.lock:
@@ -1424,6 +1438,9 @@ class Vision:
         """-> (embeddings file: one SVE1 record per frame pair, number of image cells, layout).  The layout is what
         replaces the template's <|vision_start|><|video_pad|><|vision_end|>: text token ids (the "Video:" label,
         timestamps, each pair's <|vision_start|> / <|vision_end|>) and image cell counts, in order."""
+        hit = embeddings.lookup(getattr(self, "store", None), source, "video")
+        if hit:
+            return hit
         data = self.load(source)
         o = self.video_options(opts or {})
         key = hashlib.sha256(data + json.dumps(o, sort_keys=True).encode()).hexdigest()[:32]
@@ -3050,6 +3067,30 @@ def make_handler(svc: Service):
             self.end_headers()
             self.wfile.write(body)
 
+        def _embeddings_upload(self):
+            """POST /v1/strata/embeddings, body: a bundle (serve/embeddings.py) -> {"id", "kind", "n"}; the id goes
+            into an image_embeddings / video_embeddings part."""
+            store = getattr(svc.vision, "store", None)
+            if store is None:
+                self._json(400, {"error": {"message": "this server was started without vision, so it takes no "
+                                                      "pictures or videos"}})
+                return
+            size = int(self.headers.get("Content-Length") or 0)
+            if size <= 0 or size > UPLOAD_MAX:
+                self._json(413 if size > 0 else 400,
+                           {"error": {"message": f"send the bundle as the body, at most {UPLOAD_MAX >> 20} MiB"}})
+                return
+            data = bytearray()
+            while len(data) < size:
+                chunk = self.rfile.read(min(1 << 20, size - len(data)))
+                if not chunk:
+                    break
+                data += chunk
+            try:
+                self._json(200, store.put(bytes(data)))
+            except ValueError as e:
+                self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
+
         def _authorized(self) -> bool:
             if not svc.api_key:
                 return True
@@ -3062,6 +3103,17 @@ def make_handler(svc: Service):
 
         def do_GET(self):
             path = self.path.split("?")[0].rstrip("/")
+            if path.startswith("/v1/strata/embeddings/"):    # strata-video: is an upload already here?
+                if not self._authorized():
+                    return
+                store = getattr(svc.vision, "store", None)
+                try:
+                    found = store is not None and store.has(path.rsplit("/", 1)[1])
+                except ValueError as e:
+                    self._json(400, {"error": {"message": str(e)}})
+                    return
+                self._json(200 if found else 404, {"id": path.rsplit("/", 1)[1], "exists": found})
+                return
             if path.startswith("/fonts/"):
                 # the web app's font (Outfit, OFL: serve/web/fonts); the page falls back to the system font
                 name = path[len("/fonts/"):]
@@ -3209,6 +3261,9 @@ def make_handler(svc: Service):
                     self._json(200, {"status": "loaded"})
                 except GpuBusy as e:
                     self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                return
+            if path == "/v1/strata/embeddings":              # strata-video: a picture or video encoded on another PC
+                self._embeddings_upload()
                 return
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
@@ -4075,13 +4130,20 @@ def main() -> int:
         if lazy and cfg.get("vision"):
             ap.error("lazy loading is text-only; disable vision in the config")
         if cfg.get("vision"):
-            print("loading the vision encoder ...", flush=True)
             # relative paths are the config's cwd's, as for the engine below
             vcfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
-                        if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
+                        if k in ("exe", "mmproj", "model", "upload_dir") and isinstance(v, str) and not os.path.isabs(v)
+                        else v)
                     for k, v in cfg["vision"].items()}
-            vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
-                            env=vision_env(cfg, env))
+            if vcfg.get("remote"):                      # strata-video: pictures and videos arrive encoded
+                tmp = Path(tempfile.mkdtemp(prefix="strata-vision-"))
+                vision = embeddings.RemoteVision(upload_store(vcfg, tmp), tmp)
+                print(f"[strata] vision remote: pictures and videos arrive encoded (POST /v1/strata/embeddings), "
+                      f"kept in {vision.store.dir}", flush=True)
+            else:
+                print("loading the vision encoder ...", flush=True)
+                vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
+                                env=vision_env(cfg, env))
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         if len(gpu_list(cfg)) > 1:

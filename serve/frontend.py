@@ -63,8 +63,11 @@ def _text_of(content) -> str:
                    ("text", "input_text", None))
 
 
-IMAGE_PARTS = ("image_url", "input_image", "image")
-VIDEO_PARTS = ("video_url", "input_video", "video")
+IMAGE_PARTS = ("image_url", "input_image", "image", "image_embeddings")
+VIDEO_PARTS = ("video_url", "input_video", "video", "video_embeddings")
+# strata-video: {"type": "image_embeddings" | "video_embeddings", "id": ...} names a picture or video another PC encoded
+# and uploaded (POST /v1/strata/embeddings); its source becomes this prefix + the id (serve/embeddings.py)
+EMBEDDINGS_REF = "strata-embeddings:"
 VIDEO_OPTIONS = ("fps", "max_frames", "max_side", "tokens")
 
 # Thinking levels.  The model's template knows low, medium and xhigh (its default; "high" means xhigh), and
@@ -105,6 +108,8 @@ def _image_source(part: dict) -> str:
     OpenAI: {"type": "image_url", "image_url": {"url": ...}} (or "image_url": "..."), Responses-style
     {"type": "input_image", "image_url": ...}; Anthropic: {"type": "image", "source": {"type": "base64",
     "media_type": ..., "data": ...}} or {"source": {"type": "url", "url": ...}}."""
+    if part.get("type") == "image_embeddings":
+        return EMBEDDINGS_REF + str(part.get("id") or "")
     if part.get("type") == "image":
         src = part.get("source") or {}
         if src.get("type") == "base64":
@@ -122,6 +127,8 @@ def _video_source(part: dict) -> tuple[str, dict]:
     {"type": "input_video", "video_url": ...}, and {"type": "video", "source": {"type": "base64" | "url" | "path",
     ...}} or {"type": "video", "video": "..."}.  Options ("fps", "max_frames", "max_side", "tokens") may sit on the part or
     beside the url; unset ones take the server's defaults."""
+    if part.get("type") == "video_embeddings":                 # encoded already: its options were the encoder's
+        return EMBEDDINGS_REF + str(part.get("id") or ""), {}
     src = part.get("video_url")
     if part.get("type") == "video":
         src = part.get("source") or part.get("video") or {}
