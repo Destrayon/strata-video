@@ -65,7 +65,7 @@ def _text_of(content) -> str:
 
 IMAGE_PARTS = ("image_url", "input_image", "image")
 VIDEO_PARTS = ("video_url", "input_video", "video")
-VIDEO_OPTIONS = ("fps", "max_frames", "max_side")
+VIDEO_OPTIONS = ("fps", "max_frames", "max_side", "tokens")
 
 # Thinking levels.  The model's template knows low, medium and xhigh (its default; "high" means xhigh), and
 # enable_thinking=false for none.  Clients spell these many ways; everything maps onto those four.
@@ -120,7 +120,7 @@ def _video_source(part: dict) -> tuple[str, dict]:
     """A video part's source (a data: URL, an http(s) URL or a local file path) and its sampling options.
     OpenAI-style {"type": "video_url", "video_url": {"url": ..., "fps": 1}} (or "video_url": "..."), Responses-style
     {"type": "input_video", "video_url": ...}, and {"type": "video", "source": {"type": "base64" | "url" | "path",
-    ...}} or {"type": "video", "video": "..."}.  Options ("fps", "max_frames", "max_side") may sit on the part or
+    ...}} or {"type": "video", "video": "..."}.  Options ("fps", "max_frames", "max_side", "tokens") may sit on the part or
     beside the url; unset ones take the server's defaults."""
     src = part.get("video_url")
     if part.get("type") == "video":

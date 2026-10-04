@@ -322,10 +322,10 @@ class VideoParts(unittest.TestCase):
         from serve.frontend import anthropic_to_messages, openai_to_messages, videos_of
         msgs, _, _ = openai_to_messages({"messages": [{"role": "user", "content": [
             {"type": "video_url", "video_url": {"url": "https://x/a.mp4", "fps": 0.5}},
-            {"type": "video_url", "video_url": "data:video/mp4;base64,AAAA", "max_frames": 8},
+            {"type": "video_url", "video_url": "data:video/mp4;base64,AAAA", "max_frames": 8, "tokens": 768},
             {"type": "video", "video": "C:/clips/c.mp4"}]}]})
         self.assertEqual(videos_of(msgs), [("https://x/a.mp4", {"fps": 0.5}),
-                                           ("data:video/mp4;base64,AAAA", {"max_frames": 8}),
+                                           ("data:video/mp4;base64,AAAA", {"max_frames": 8, "tokens": 768}),
                                            ("C:/clips/c.mp4", {})])
         msgs, _, _ = anthropic_to_messages({"messages": [{"role": "user", "content": [
             {"type": "video", "source": {"type": "base64", "media_type": "video/webm", "data": "BBBB"}}]}]})
@@ -346,8 +346,11 @@ class VideoParts(unittest.TestCase):
         v = Vision.__new__(Vision)
         v.video = dict(VIDEO_DEFAULTS)
         self.assertEqual(v.video_options({"fps": "1", "max_frames": 8}),
-                         {**VIDEO_DEFAULTS, "fps": 1.0, "max_frames": 8})
-        for bad in ({"fps": "fast"}, {"fps": 100}, {"max_frames": -1}):
+                         {**VIDEO_DEFAULTS, "fps": 1.0, "max_frames": 8, "pair_tokens": 448})
+        # the whole-video budget lowers the per-pair size when many frames are asked for: 128 frames, 64 pairs
+        self.assertEqual(v.video_options({"max_frames": 128})["pair_tokens"], 12288 // 64)
+        self.assertEqual(v.video_options({"tokens": 768, "max_frames": 8})["pair_tokens"], 768)
+        for bad in ({"fps": "fast"}, {"fps": 100}, {"max_frames": -1}, {"tokens": 99999}):
             with self.assertRaises(ValueError):
                 v.video_options(bad)
 
@@ -379,7 +382,7 @@ class VideoParts(unittest.TestCase):
             path, n, layout = v.encode_video("x", {"max_frames": 4})
             again = v.encode_video("x", {"max_frames": 4})          # cached: the encoder is not asked twice
         line = v.proc.stdin.write.call_args_list[0].args[0]
-        self.assertTrue(line.startswith("ENCV 2 4 448 5000 "), line)
+        self.assertTrue(line.startswith("ENCV 2 4 0 448 "), line)       # fps, frames, max side, tokens per pair
         self.assertEqual((n, layout), (6, [[5], 2, [6], 4]))
         self.assertEqual(again, (path, n, layout))
         self.assertEqual(v.proc.stdin.write.call_count, 1)

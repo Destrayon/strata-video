@@ -13,8 +13,9 @@ embeddings (`GENI`).  JPEG/PNG/BMP/GIF go straight in; WebP, TIFF, AVIF, ... (ag
 converted to PNG first with Pillow.
 Videos (the same "vision" entry, ffmpeg/ffprobe on PATH or its "ffmpeg_dir"): video_url parts become what
 llama.cpp's mtmd makes of a video - sampled frames, two per temporal patch, timestamp text between them - each frame
-pair an image record for the engine (`strata-vision` ENCV).  "video_fps", "video_max_frames", "video_max_side" and
-"video_timestamp_ms" in the vision entry set the defaults; a part's own "fps", "max_frames", "max_side" override them.
+pair an image record for the engine (`strata-vision` ENCV).  "video_fps", "video_max_frames", "video_max_side",
+"video_tokens" and "video_total_tokens" in the vision entry set the defaults; a part's own "fps", "max_frames",
+"max_side", "tokens" override them.
 Requests whose prompt plus max tokens exceed the engine's context are REJECTED with 400, never truncated.
 An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context.
 
@@ -69,9 +70,10 @@ IMAGE_PAD = "<|image_pad|>"
 VIDEO_PAD = "<|video_pad|>"
 VISION_END = "<|vision_end|>"
 # a video's defaults (the vision entry's video_* keys override them): Qwen's 2 fps, at most 32 frames (a longer video
-# is sampled more sparsely), frames shrunk to 448 px on the longer side (~100 tokens per frame pair at 16:9), and a
-# timestamp every 5 s as llama.cpp writes them
-VIDEO_DEFAULTS = {"fps": 2.0, "max_frames": 32, "max_side": 448, "timestamp_ms": 5000}
+# is sampled more sparsely), frames sized to ~448 tokens per frame pair (896x504 at 16:9: 18-28 px text stays readable;
+# ~100 tokens lost it on a busy background), and at most ~12,288 tokens for the whole video (Qwen3-VL's shipped
+# video budget), which lowers the per-pair size when more frames are asked for; max_side 0 = no extra cap
+VIDEO_DEFAULTS = {"fps": 2.0, "max_frames": 32, "max_side": 0, "tokens": 448, "total_tokens": 12288}
 # #458: the trailing effort turn ("effort_position": "end"); low is the template's own sentence, medium (which the
 # template says nothing for: no xhigh sentence is medium there) says it, since the xhigh one stays at the top
 EFFORT_TURN = "<|im_start|>system\n{}<|im_end|>\n"
@@ -1400,17 +1402,22 @@ class Vision:
         return out
 
     def video_options(self, opts: dict) -> dict:
-        """The server's video defaults with a request's own fps / max_frames / max_side on top (checked)."""
+        """The server's video defaults with a request's own fps / max_frames / max_side / tokens on top (checked);
+        "pair_tokens" is what each frame pair gets: tokens, lowered so the pairs fit total_tokens."""
         o = dict(self.video)
-        for k in ("fps", "max_frames", "max_side"):
+        for k in ("fps", "max_frames", "max_side", "tokens"):
             if k in (opts or {}):
                 try:
                     v = float(opts[k]) if k == "fps" else int(opts[k])
                 except (TypeError, ValueError):
                     raise ValueError(f"a video's {k} must be a number") from None
-                if v < 0 or (k == "fps" and v > 60) or (k == "max_frames" and v > 2048):
+                if v < 0 or (k == "fps" and v > 60) or (k == "max_frames" and v > 2048) or (k == "tokens" and v > 4096):
                     raise ValueError(f"a video's {k} is out of range")
                 o[k] = v
+        pairs = (int(o["max_frames"]) + 1) // 2
+        o["pair_tokens"] = int(o["tokens"])
+        if pairs > 0 and int(o.get("total_tokens") or 0) > 0:
+            o["pair_tokens"] = max(64, min(o["pair_tokens"], int(o["total_tokens"]) // pairs))
         return o
 
     def encode_video(self, source: str, opts: dict | None = None) -> tuple[Path, int, list]:
@@ -1427,7 +1434,7 @@ class Vision:
             vid.write_bytes(data)
             try:
                 self.proc.stdin.write(f"ENCV {o['fps']:g} {int(o['max_frames'])} {int(o['max_side'])} "
-                                      f"{int(o['timestamp_ms'])} {vid} {out}\n")
+                                      f"{int(o['pair_tokens'])} {vid} {out}\n")
                 self.proc.stdin.flush()
                 line = self.proc.stdout.readline().strip()
                 layout = self.proc.stdout.readline().strip() if line.startswith("OK") else ""
