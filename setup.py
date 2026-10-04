@@ -998,6 +998,21 @@ def find_vcvars(any_version=False):
     return v if v and v.exists() else None
 
 
+def find_vcvars_cuda():
+    """(vcvars, its arguments) for a CUDA build: Visual Studio 2019/2022, or a newer one with a VS 2022 toolset
+    (14.3x/14.4x, an optional component) picked by -vcvars_ver - nvcc rejects the newer compilers.  (None, "")."""
+    v = find_vcvars()
+    if v is not None:
+        return v, ""
+    v = find_vcvars(any_version=True)
+    if v is None:
+        return None, ""
+    msvc = v.parents[2] / "Tools" / "MSVC"
+    old = sorted((p.name for p in msvc.iterdir() if re.match(r"14\.(3|4)\d\.", p.name)), reverse=True) \
+        if msvc.is_dir() else []
+    return (v, "-vcvars_ver=" + ".".join(old[0].split(".")[:2])) if old else (None, "")
+
+
 def find_tool(name):
     """A tool on PATH, or the one pip installed next to this Python (cmake, ninja).  A PATH copy that does not run
     (a pip launcher whose Python is gone) is skipped for the one next to this Python."""
@@ -1932,22 +1947,41 @@ def build_vision_cpu(eng: Path, stamp: Path, meta: dict, llama, vsrc, vcvars=Non
     return eng
 
 
-def fork_vision(eng: Path, vision: str, llama) -> str:
+def fork_vision(eng: Path, vision: str, llama, gpu=None) -> str:
     """strata-video: the ready-made encoder predates videos (strata-vision ENCV), so this fork's own encoder is
-    compiled beside the ready-made engine - for the CPU, which needs no CUDA toolkit; `--build` compiles the engine
-    and a GPU encoder here instead.  Without a compiler the ready-made encoder stays: images work, videos do not."""
+    compiled beside the ready-made engine - for the GPU when a CUDA toolkit for the card (12.8+ for RTX 50) and a
+    compiler nvcc accepts are here, else for the CPU, which needs neither; `--build` compiles the engine too.  Without
+    a compiler the ready-made encoder stays: images work, videos do not."""
     meta = json.loads((eng / "BUILD.json").read_text())
     vsrc = source_hash(VISION_SOURCES)
-    if vision == "none" or meta.get("vision_src") == vsrc:
+    if vision == "none" or (meta.get("vision_src") == vsrc and meta.get("vision") == vision):
         return vision
+    if vision == "gpu" and gpu is not None:
+        arch = int(gpu["arch"])
+        nvcc, ver = find_nvcc()
+        vcvars, vargs = find_vcvars_cuda() if WIN else (None, "")
+        if nvcc and ver >= ((12, 8) if arch >= 120 else (12, 0)) and (vcvars or not WIN):
+            say(f"  Compiling the image encoder with CUDA {ver[0]}.{ver[1]} for sm_{arch} (10-20 minutes, once) ...")
+            bdir = ROOT / "build-vision-gpu"
+            cmake_build(ROOT / "tools" / "vision", bdir, "strata-vision",
+                        [f"-DLLAMA_DIR={llama}", "-DSTRATA_VISION_CUDA=ON", f"-DCMAKE_CUDA_ARCHITECTURES={arch}",
+                         f"-DCMAKE_CUDA_COMPILER={nvcc}"], vcvars, "build-vision-gpu.bat", vargs)
+            shutil.copy2(bdir / "bin" / VEXE, eng / VEXE)
+            (eng / "BUILD.json").write_text(json.dumps({**meta, "vision": "gpu", "vision_src": vsrc,
+                                                        "vision_archs": [arch]}, indent=1))
+            ok(f"image encoder (GPU, sm_{arch}): {eng / VEXE}")
+            return "gpu"
+    if meta.get("vision_src") == vsrc:
+        return meta.get("vision") or "cpu"
     vcvars = find_vcvars(any_version=True) if WIN else None
     if WIN and vcvars is None:
         warn("videos need this fork's image encoder, compiled with Visual Studio's C++ tools (none found): images "
              "only for now")
         return vision
     if vision == "gpu":
-        warn("the video-capable image encoder runs on the CPU beside the ready-made engine (setup --build compiles "
-             "one for your GPU)")
+        warn("the video-capable image encoder runs on the CPU beside the ready-made engine: a GPU one needs the CUDA "
+             "toolkit for your card (12.8 or newer for RTX 50) and Visual Studio 2022's C++ tools (or its toolset in "
+             "a newer Visual Studio)")
     build_vision_cpu(eng, eng / "BUILD.json", meta, llama, vsrc, vcvars)
     return "cpu"
 
@@ -2231,7 +2265,7 @@ def install_build_tools(gpu, yes):
     return nvcc, find_vcvars() if WIN else None
 
 
-def cmake_build(src, bdir, target, defs, vcvars, bat_name):
+def cmake_build(src, bdir, target, defs, vcvars, bat_name, vcvars_args=""):
     cmake, ninja = find_tool("cmake"), find_tool("ninja")
     if cmake is None or ninja is None:
         fail("cmake / ninja not found after installing them", "run: .venv python -m pip install cmake ninja")
@@ -2243,7 +2277,7 @@ def cmake_build(src, bdir, target, defs, vcvars, bat_name):
     if WIN:
         bat = ROOT / bat_name
         q = lambda c: " ".join(f'"{x}"' if " " in str(x) else str(x) for x in c)  # noqa: E731
-        bat.write_text(f'@echo off\r\ncall "{vcvars}" >nul\r\n{q(conf)} || exit /b 1\r\n{q(build)} && exit /b 0\r\n'
+        bat.write_text(f'@echo off\r\ncall "{vcvars}" {vcvars_args} >nul\r\n{q(conf)} || exit /b 1\r\n{q(build)} && exit /b 0\r\n'
                        f'echo   (the build stopped - trying it once more)\r\n{q(build)} || exit /b 1\r\n',
                        encoding="utf-8")
         run(["cmd", "/c", str(bat)])
@@ -4140,7 +4174,7 @@ def main() -> int:
             eng = None
         else:
             vision = prebuilt_vision(json.loads((eng / "BUILD.json").read_text()), gpu, vision)
-            vision = fork_vision(eng, vision, llama)
+            vision = fork_vision(eng, vision, llama, gpu)
     if eng is None:
         eng = build_engine_hip(gpu, llama, vision) if hip else build_engine(gpu, vision, a.yes, llama, toolkit=cuda_tk)
     meta = json.loads((eng / "BUILD.json").read_text())
