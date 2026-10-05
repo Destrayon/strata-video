@@ -1040,6 +1040,23 @@ Qwen3-VL layout and the new defaults (2,645 prompt tokens) the revolver "first a
 For game QA, see [the research notes](research/video-game-qa-vlm-2026-10-04.md): these models catch glitches visible
 in one frame far better than ones that only show across frames, and work best as a filter for human review.
 
+### Videos from a coding agent: watch_video
+
+`tools/video_mcp.py` is an MCP server with one tool, `watch_video(path, question)`: an agent (Qwen Code, Claude Code,
+...) asks about a video file on the PC and gets the model's answer as text. The file goes to Strata as a `video_url`
+path, so the video proxy (or a server with its own encoder) reads it from disk at full quality - Qwen Code's own file
+reading refuses anything over 10 MB, and a video read into the agent's conversation fills its context. Questions
+about the same path continue one conversation, so the read video is reused. Options: `effort` (thinking, default
+low), `fps`, `tokens`, `total_tokens`, `new_conversation`.
+
+```json
+"mcpServers": {"strata-video": {"command": "python", "args": ["<Strata>/tools/video_mcp.py"], "timeout": 3600000}}
+```
+
+Measured: a 284 MB, 51-second 1080p30 gameplay recording, asked "what is happening" in Qwen Code: one `watch_video`
+call, 308 s in all, a timeline that names the HUD (minimap, quest panel, HP/MP/STA bars), the skills menu, the enemy
+("Wolf 65/65" falling to 7/65) and the abilities used, with times.
+
 ### Encoding on one PC, the model on another
 
 A server can run the model alone while a PC with a better GPU encodes the pictures and videos. The server is set
