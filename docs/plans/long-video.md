@@ -24,3 +24,11 @@ Later (not in this plan): videos longer than the context split automatically in 
   72 frames / 16,128 tokens / 8.6 s; 10 min at 39K -> 614 frames (~1 fps) / 36,840 / 21 s; 10 min at 157K -> 1,200
   frames (2 fps) / 158,400 / 71 s (0.7% over before the 3% margin). Test video: scratchpad `long-10min.mp4` (20
   scenes of 30 s, "BOSS SPAWNED" 7:13-7:15).
+- Phase 2: VIDEO_DEFAULTS (total 0 = auto, context_share 0.6, min 128, max_frames 2048), `Vision.context` from the
+  engine / the proxy's `Upstream.context()`; tests 156 + 7 pass (8aea237).
+- Phase 3: installed via setup, proxy restarted (now `--log`). 10 min video on the 2080 Ti server, 64K: scene at 7:20
+  right, boss banner at 7:13 right, 68 s / follow-up 2.9 s. Qwen Code: Strata refused its requests (prompt + its 32K
+  max_tokens > 64K; Qwen Code's settings v4 migration dropped samplingParams) -> the proxy now resends with the
+  max_tokens that fit. 36 s video via Qwen Code: one read, no ffmpeg, 15 requests, 0 refused, 491 s, HP drops right.
+- Phase 4: QWEN.md (read whole; cut only to zoom in), DETAILS.md keys/long-video/measurements, proxy notes. Next action:
+  tier 2 (videos longer than the context) when needed; a 256K context on the server.

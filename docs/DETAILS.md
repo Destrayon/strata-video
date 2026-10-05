@@ -971,14 +971,32 @@ its answers placed events about 1 s late.)
 
 | `"vision"` key | Default | What it does |
 | --- | --- | --- |
-| `video_fps` | 2 | frames sampled per second |
-| `video_max_frames` | 32 | a longer video is sampled more sparsely, so the frames still cover all of it (0: no cap) |
+| `video_fps` | 2 | frames sampled per second, at most |
 | `video_tokens` | 448 | each frame is sized so a pair is about this many tokens (one token per 32x32 pixels; 448 = 896x504 at 16:9) |
-| `video_total_tokens` | 12,288 | the whole video's budget (Qwen3-VL's shipped default): more frames lower the per-pair size, to at least 64 |
+| `video_total_tokens` | 0 | the whole video's budget; 0 = automatic: `video_context_share` of the model's context, at most 224K |
+| `video_context_share` | 0.6 | the share of the context an automatic budget takes (64K: ~39K tokens; 256K: 157K) |
+| `video_min_tokens` | 128 | the smallest a frame pair gets before the frame rate drops instead (Qwen3-VL's minimum) |
+| `video_max_frames` | 2,048 | a hard cap (the Qwen3-VL report's evaluation limit) |
 | `video_max_side` | 0 | an extra cap on the frames' longer side (0: none) |
 
-A request can set `fps`, `max_frames`, `tokens` and `max_side` for one video. `"max_tokens"` in the `"vision"`
-section caps every frame pair as it caps a picture (setup sets 1,024 for a GPU encoder, 300 for the CPU one).
+**Long videos fit themselves.** `strata-vision` reads the video's length and plans within the budget: every frame at 2
+fps and 448 tokens per pair while that fits, then smaller frames down to 128, then a lower frame rate spread over the
+whole video - so a video of any length is one request, with each frame pair's real time in front of it. It encodes
+64 frames at a time, so memory does not grow with the length (859 MB peak for a 10-minute video). The Qwen3.8-Flash-Next
+card recommends up to 224K video tokens for hour-scale video; a 256K context (setup `--context 262144`) gives that room.
+A request can set `fps`, `max_frames`, `tokens`, `total_tokens` and `max_side` for one video. `"max_tokens"` in the
+`"vision"` section caps every frame pair as it caps a picture (setup sets 1,024 for a GPU encoder, 300 for the CPU one).
+
+| Video (GPU encoder) | Budget | Frames | Tokens | Encode |
+| --- | ---: | ---: | ---: | ---: |
+| 36 s, 1080p | 39K (64K context) | 72 (2 fps) | 16,128 | 8.6 s |
+| 10 min, 540p | 39K (64K context) | 614 (~1 fps) | 36,840 | 21 s |
+| 10 min, 540p | 157K (256K context) | 1,200 (2 fps) | 158,400 | 71 s |
+
+The 10-minute video (20 scenes of 30 s, a 2-second "BOSS SPAWNED" banner at 7:13) asked through the video proxy on the
+RTX 2080 Ti server (IQ3_S, 64K context), thinking off: "SCENE 15 is shown ... at 7:20" (right) and the banner "appears
+at 7:13 and lasts for 3 seconds" (2 in truth) - one request of 38,589 prompt tokens, 68 s in all (encoding, upload and
+reading at 909 tokens/s), the follow-up 2.9 s from the conversation cache.
 
 **Reading text** (HUDs, subtitles, signs), measured on a 12-second 1080p clip drawn for it: a busy background, a
 20 px HUD (`HP 87 AMMO 23/90`, changing to `HP 41 AMMO 7/90` at 6 s), an 18 px sign, three 28 px subtitles changing
@@ -1044,7 +1062,10 @@ the vocabulary):
 python tools/video_proxy.py --server http://<server>:8080 --api-key <secret> --config strata-iq2_xs.json
 ```
 
-and open `http://127.0.0.1:8090`. The server checks that the encodings fit its model (their width, and the encoder
+and open `http://127.0.0.1:8090`. The proxy reads the server's context from its `/health` for the automatic video
+budget; when the server refuses a request only because prompt + `max_tokens` passes the context (agent clients such
+as Qwen Code ask for 32K by habit), it sends it once more with the `max_tokens` the server says fit. `--log FILE`
+writes every request (size, status, time, errors). The server checks that the encodings fit its model (their width, and the encoder
 file's SHA-256 when its config sets `"mmproj_sha256"`); it keeps uploads in `strata-uploads/`, up to 8 GB
 (`"max_upload_gb"`), and a picture or video already uploaded is not sent again.
 

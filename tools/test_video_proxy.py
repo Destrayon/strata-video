@@ -58,6 +58,13 @@ class FakeServer(BaseHTTPRequestHandler):
             FakeServer.uploads[bid] = h
             self._send(200, {"id": bid, "kind": h["kind"], "n": h["n"]})
             return
+        req = json.loads(body or b"{}")
+        if req.get("max_tokens", 0) > 5000:                            # Strata's refusal, word for word
+            self._send(400, {"error": {"type": "invalid_request_error", "message":
+                             f"prompt (60000 tokens) + max tokens ({req['max_tokens']}) exceeds the context (65536); "
+                             "requests are never truncated. Send a smaller max_tokens (at most 4512 here), or add "
+                             "\"fit_max_tokens\": true to the model's strata-<model>.json to shorten it"}})
+            return
         self.send_response(200)                                        # a streamed answer, no Content-Length
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -159,6 +166,13 @@ class Proxy(unittest.TestCase):
                   {"Origin": "https://evil.example"})
         h = [h for m, p, h, b in FakeServer.log if p == "/v1/chat/completions"][-1]
         self.assertEqual(h["Origin"], "https://evil.example")             # anyone else's stays: the server refuses
+
+    def test_too_long_an_answer_is_shortened_and_sent_again(self):
+        out = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 32000, "stream": True,
+                                                 "messages": [{"role": "user", "content": "hi"}]})
+        self.assertIn(b"[DONE]", out)                                   # the client got the answer, not the 400
+        sent = self.sent("/v1/chat/completions")
+        self.assertEqual([s["max_tokens"] for s in sent], [32000, 4512])
 
     def test_video_budget_follows_the_servers_context(self):
         self.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": [

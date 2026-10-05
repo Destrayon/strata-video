@@ -21,6 +21,7 @@ import copy
 import hashlib
 import http.client
 import json
+import re
 import sys
 import threading
 import time
@@ -35,6 +36,7 @@ from serve.frontend import IMAGE_PARTS, VIDEO_PARTS, _image_source, _video_sourc
 
 ENCODED = ("image_embeddings", "video_embeddings")
 REWRITE = ("/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens", "/v1/responses")
+FIT_RE = re.compile(r"exceeds the context \(\d+\).*?at most (\d+) here")   # serve/server.py's prepare() refusal
 HOP = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "proxy-connection", "upgrade",
        "accept-encoding"}
 
@@ -148,11 +150,16 @@ class Encoder:
         return {k: (self.rewrite(v) if k in ("messages", "input", "content") else v) for k, v in obj.items()}
 
 
-def make_handler(upstream: Upstream, encoder: Encoder, own_origins: set[str]):
+def make_handler(upstream: Upstream, encoder: Encoder, own_origins: set[str], log=None):
+    def note(msg: str):
+        if log is not None:
+            log.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+            log.flush()
+
     class Proxy(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"                  # the answer ends when the connection closes: streams pass
 
-        def log_message(self, fmt, *args):            # quiet; errors still reach the client
+        def log_message(self, fmt, *args):            # quiet (--log writes each request); errors reach the client
             pass
 
         def _headers(self) -> dict:
@@ -176,11 +183,42 @@ def make_handler(upstream: Upstream, encoder: Encoder, own_origins: set[str]):
             self.end_headers()
             self.wfile.write(body)
 
-        def _forward(self, body: bytes | None):
+        def _fit(self, body: bytes, err: bytes) -> bytes | None:
+            """A request refused only because prompt + max tokens passes the context: the same request with the
+            max tokens the server says still fit (it never truncates; agent clients ask for 32K by habit)."""
+            m = FIT_RE.search(err.decode("utf-8", "replace"))
+            if not m or int(m.group(1)) < 256:
+                return None
+            try:
+                req = json.loads(body)
+            except ValueError:
+                return None
+            keys = [k for k in ("max_tokens", "max_completion_tokens", "max_output_tokens") if k in req] or ["max_tokens"]
+            for k in keys:
+                req[k] = int(m.group(1))
+            return json.dumps(req).encode()
+
+        def _forward(self, body: bytes | None, retry: bool = True):
             c = upstream.conn()
+            t0, sent, status, started = time.monotonic(), 0, None, False
             try:
                 c.request(self.command, self.path, body=body, headers=self._headers())
                 r = c.getresponse()
+                status = r.status
+                if status == 400 and retry and body and self.command == "POST":
+                    err = r.read()
+                    fitted = self._fit(body, err)
+                    if fitted is not None:
+                        note(f"{self.command} {self.path}: answer length shortened to fit the context, sent again")
+                        c.close()
+                        return self._forward(fitted, retry=False)
+                    self.send_response(r.status, r.reason)
+                    self.send_header("Content-Type", r.getheader("Content-Type") or "application/json")
+                    self.send_header("Content-Length", str(len(err)))
+                    self.end_headers()
+                    self.wfile.write(err)
+                    note(f"{self.command} {self.path} -> 400: {err[:2048].decode('utf-8', 'replace')}")
+                    return
                 self.send_response(r.status, r.reason)
                 for k, v in r.getheaders():
                     if k.lower() not in HOP:
@@ -188,17 +226,27 @@ def make_handler(upstream: Upstream, encoder: Encoder, own_origins: set[str]):
                 if r.getheader("Content-Length"):
                     self.send_header("Content-Length", r.getheader("Content-Length"))
                 self.end_headers()
+                started = True
+                head = b""
                 while True:                            # piece by piece: a streamed answer arrives as it is made
                     chunk = r.read1(65536) if hasattr(r, "read1") else r.read(65536)
                     if not chunk:
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
+                    sent += len(chunk)
+                    if status >= 400 and len(head) < 2048:
+                        head += chunk[:2048 - len(head)]
+                note(f"{self.command} {self.path} -> {status}, {sent:,} bytes in {time.monotonic() - t0:.1f} s"
+                     + (f": {head.decode('utf-8', 'replace')}" if head else ""))
             except OSError as e:
-                try:
-                    self._error(502, f"the Strata server at {upstream.origin} did not answer ({e})")
-                except OSError:
-                    pass
+                note(f"{self.command} {self.path} -> {status}, {sent:,} bytes, broken after {time.monotonic() - t0:.1f} s:"
+                     f" {type(e).__name__}: {e}")
+                if not started:
+                    try:
+                        self._error(502, f"the Strata server at {upstream.origin} did not answer ({e})")
+                    except OSError:
+                        pass
             finally:
                 c.close()
 
@@ -216,6 +264,7 @@ def make_handler(upstream: Upstream, encoder: Encoder, own_origins: set[str]):
             body = self._body()
             path = self.path.split("?")[0].rstrip("/")
             if path in REWRITE and body:
+                t0 = time.monotonic()
                 try:
                     req = json.loads(body)
                     if isinstance(req, dict):
@@ -223,8 +272,15 @@ def make_handler(upstream: Upstream, encoder: Encoder, own_origins: set[str]):
                 except json.JSONDecodeError:
                     pass                                # the server says what is wrong with it
                 except ValueError as e:
+                    note(f"POST {path}: refused while encoding: {e}")
                     self._error(400, str(e))
                     return
+                except Exception as e:                  # anything else: say so, never drop the connection silently
+                    import traceback
+                    note(f"POST {path}: failed while encoding:\n{traceback.format_exc()}")
+                    self._error(500, f"the video proxy failed while encoding this request: {type(e).__name__}: {e}")
+                    return
+                note(f"POST {path}: {len(body):,} bytes after encoding ({time.monotonic() - t0:.1f} s)")
             self._forward(body)
 
     return Proxy
@@ -251,6 +307,7 @@ def main(argv=None):
     ap.add_argument("--gpu", action="store_true", help="run the encoder on the GPU")
     ap.add_argument("--max-tokens", type=int, help="the most tokens a picture or frame pair becomes")
     ap.add_argument("--dtype", choices=["f16", "f32"], default="f16", help="upload precision (f16: half the size)")
+    ap.add_argument("--log", help="write each request (size, status, time, errors) to this file")
     a = ap.parse_args(argv)
 
     vcfg = {}
@@ -274,7 +331,8 @@ def main(argv=None):
     print("starting the vision encoder ...", flush=True)
     encoder = Encoder(Vision(vcfg), upstream, a.dtype, digest)
     own = {f"http://{h}:{a.port}" for h in ("127.0.0.1", "localhost", a.host)}
-    httpd = ThreadingHTTPServer((a.host, a.port), make_handler(upstream, encoder, own))
+    log = open(a.log, "a", encoding="utf-8") if a.log else None
+    httpd = ThreadingHTTPServer((a.host, a.port), make_handler(upstream, encoder, own, log))
     print(f"ready: http://{a.host}:{a.port} -> {upstream.origin} (pictures and videos encoded here, {a.dtype})",
           flush=True)
     try:
