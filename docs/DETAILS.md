@@ -1057,6 +1057,13 @@ Measured: a 284 MB, 51-second 1080p30 gameplay recording, asked "what is happeni
 call, 308 s in all, a timeline that names the HUD (minimap, quest panel, HP/MP/STA bars), the skills menu, the enemy
 ("Wolf 65/65" falling to 7/65) and the abilities used, with times.
 
+**Comparing videos** (target gameplay against ours): `paths: [a, b]` shows them as Video A and Video B in one request,
+and the automatic budget is shared (each of two gets half). Measured with that recording as A and a copy as B with
+three known changes - the minimap blacked out, colours at 30% saturation, played 25% faster: all three found (the
+black box in place of the minimap, the grey-sepia look traced through the HP/MP/STA bars, ability icons and effects,
+and "roughly 20-25% faster" with matching moments in both), plus one false difference (a skill hovered in B that does
+not exist). 42,606 prompt tokens, 153 s, effort low.
+
 ### Encoding on one PC, the model on another
 
 A server can run the model alone while a PC with a better GPU encodes the pictures and videos. The server is set
