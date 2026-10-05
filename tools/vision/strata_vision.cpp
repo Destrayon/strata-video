@@ -9,7 +9,7 @@
 //
 // Resident: prints "READY <n_embd>", then per stdin line
 //   ENC <image path> <output path>   ->  "OK <n_tokens> <nx> <ny> <ms>"  or  "ERR <message>"
-//   ENCV <fps> <max_frames> <max_side> <pair_tokens> <video path> <output path>
+//   ENCV <fps> <max_frames> <max_side> <pair_tokens> <total_tokens> <min_pair_tokens> <video path> <output path>
 //                                    ->  "OK <n_tokens> <n_groups> <n_frames> <ms>" then "LAYOUT <layout>"
 //   QUIT
 // The output file is  int32 {0x31455653 'SVE1', n_tokens, nx, ny, n_embd}  then float32 [n_tokens][n_embd],
@@ -23,6 +23,8 @@
 // one record's n image cells.  <max_frames> lowers the rate for a long video (0 = no cap); <pair_tokens> sizes each
 // frame so a pair is about that many tokens (0 = as decoded, up to --max-tokens), <max_side> caps the longer side
 // (0 = no cap).  Small text needs a large <pair_tokens>: a token covers 32x32 pixels of the sized frame.
+// <total_tokens> is the whole video's budget (0 = none): a long video first gets smaller frames, down to
+// <min_pair_tokens> per pair, then a lower rate.  Encoding runs 32 pairs at a time, so memory does not grow with length.
 #include "gguf.h"
 #include "llama.h"
 #include "mtmd.h"
@@ -58,12 +60,18 @@ bool parse_enc(const std::string& line, std::string& img, std::string& out) {
     return !img.empty() && !out.empty();
 }
 
-// "ENCV <fps> <max_frames> <max_side> <pair_tokens> <video> <out>": the numbers first, then the paths as for ENC
-struct EncvArgs { float fps = 0; int max_frames = 0, max_side = 0, pair_tokens = 0; std::string video, out; };
+// "ENCV <fps> <max_frames> <max_side> <pair_tokens> <total_tokens> <min_pair_tokens> <video> <out>": the numbers
+// first, then the paths as for ENC
+struct EncvArgs {
+    float fps = 0;
+    int max_frames = 0, max_side = 0, pair_tokens = 0, total_tokens = 0, min_pair_tokens = 0;
+    std::string video, out;
+};
 bool parse_encv(const std::string& line, EncvArgs& a) {
     if (line.rfind("ENCV ", 0) != 0) return false;
     std::istringstream is(line.substr(5));
-    if (!(is >> a.fps >> a.max_frames >> a.max_side >> a.pair_tokens)) return false;
+    if (!(is >> a.fps >> a.max_frames >> a.max_side >> a.pair_tokens >> a.total_tokens >> a.min_pair_tokens))
+        return false;
     std::string rest;
     std::getline(is, rest);
     rest.erase(0, rest.find_first_not_of(' '));
@@ -250,7 +258,8 @@ int main(int argc, char** argv) {
         EncvArgs va;
         if (line.rfind("ENCV ", 0) == 0) {
             if (!parse_encv(line, va)) {
-                std::printf("ERR expected: ENCV <fps> <max_frames> <max_side> <pair_tokens> <video> <output>\n");
+                std::printf("ERR expected: ENCV <fps> <max_frames> <max_side> <pair_tokens> <total_tokens> "
+                            "<min_pair_tokens> <video> <output>\n");
                 std::fflush(stdout);
                 continue;
             }
@@ -260,70 +269,98 @@ int main(int argc, char** argv) {
             vp.timestamp_interval_ms = 0;                     // the timestamps are written below, one per pair
             vp.ffmpeg_bin_dir = ffmpeg_dir.empty() ? nullptr : ffmpeg_dir.c_str();
             mtmd_helper_video* video = mtmd_helper_video_init(ctx, va.video.c_str(), vp);
-            if (video && va.max_frames > 0) {
-                // a long video: a lower rate spreads the capped frames over all of it (the cap alone would keep
-                // only its start); the hard cap in read_frames stays for a duration ffprobe estimated short
-                const mtmd_helper_video_info vi = mtmd_helper_video_get_info(video);
-                if (vi.n_frames > va.max_frames && vi.fps > 0) {
-                    vp.fps_target = vi.fps * (float) va.max_frames / (float) vi.n_frames;
-                    mtmd_helper_video_free(video);
-                    video = mtmd_helper_video_init(ctx, va.video.c_str(), vp);
-                }
-            }
             if (!video) {
                 std::printf("ERR cannot read the video %s (is ffmpeg/ffprobe installed?)\n", va.video.c_str());
                 std::fflush(stdout);
                 continue;
             }
-            const float fps = mtmd_helper_video_get_info(video).fps;
-            std::vector<mtmd_bitmap*> frames;
-            std::string err, layout;
-            if (!read_frames(video, va.max_frames, va.max_side, va.pair_tokens, frames) || fps <= 0)
-                err = "the video could not be read";
-            const int n_frames = (int) frames.size();
-            // an odd last frame is doubled to complete its pair, as the reference processor pads it
-            if (err.empty() && n_frames % 2 == 1) {
-                const mtmd_bitmap* last = frames.back();
-                mtmd_bitmap* dup = mtmd_bitmap_init(mtmd_bitmap_get_nx(last), mtmd_bitmap_get_ny(last),
-                                                    mtmd_bitmap_get_data(last));
-                mtmd_bitmap_set_mergeable(dup, true);
-                frames.push_back(dup);
-            }
-            // per pair "<t seconds>" then two markers with nothing between them, so mtmd merges exactly 0+1, 2+3, ...
-            // (it wraps each merged pair in <|vision_start|> ... <|vision_end|> itself)
-            const std::string marker = mtmd_default_marker();
-            std::string prompt;
-            for (size_t i = 0; i + 1 < frames.size(); i += 2) {
-                const double t_pair = (std::min((int) i, n_frames - 1) + std::min((int) i + 1, n_frames - 1)) / 2.0 / fps;
-                char ts[48];
-                std::snprintf(ts, sizeof ts, "<%.1f seconds>", t_pair);
-                prompt += ts + marker + marker;
-            }
-            mtmd_input_chunks* chunks = mtmd_input_chunks_init();
-            mtmd_input_text txt{prompt.c_str(), prompt.size(), false, true};
-            int total = 0, groups = 0;
-            std::FILE* f = nullptr;
-            if (err.empty() && frames.empty()) err = "the video has no frames";
-            if (err.empty() && mtmd_tokenize(ctx, chunks, &txt, frames.data(), frames.size()) != 0)
-                err = "the video could not be preprocessed";
-            if (err.empty() && !(f = std::fopen(va.out.c_str(), "wb"))) err = "cannot write " + va.out;
-            for (size_t c = 0; err.empty() && c < mtmd_input_chunks_size(chunks); ++c) {
-                const mtmd_input_chunk* ch = mtmd_input_chunks_get(chunks, c);
-                if (!layout.empty()) layout += ';';
-                if (mtmd_input_chunk_get_type(ch) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
-                    size_t nt = 0;
-                    const llama_token* tk = mtmd_input_chunk_get_tokens_text(ch, &nt);
-                    layout += 'T';
-                    for (size_t j = 0; j < nt; ++j) layout += (j ? "," : "") + std::to_string(tk[j]);
-                } else if (mtmd_input_chunk_get_type(ch) == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
-                    int n = 0, nx = 0, ny = 0;
-                    err = write_record(ctx, ch, n_embd, f, n, nx, ny);
-                    layout += 'I' + std::to_string(n);
-                    total += n;
-                    ++groups;
-                } else {
-                    err = "the video gave a chunk that is neither text nor image";
+            // The plan, from the probed length (n_frames at the asked rate): every frame while the pairs fit the
+            // whole-video budget at <pair_tokens>; past that smaller frames, down to <min_pair_tokens> per pair;
+            // past that fewer frames - a lower rate spreads them over the whole video (a cap alone would keep only
+            // its start).  The hard cap in read_frames stays for a length ffprobe estimated short.
+            const mtmd_helper_video_info vi0 = mtmd_helper_video_get_info(video);
+            int want = vi0.n_frames > 0 ? vi0.n_frames : (va.max_frames > 0 ? va.max_frames : 64);
+            int frames_plan = va.max_frames > 0 ? std::min(want, va.max_frames) : want;
+            int pair_tok = va.pair_tokens;
+            if (va.total_tokens > 0) {
+                // 3% under the budget: frames are sized to a 32-pixel grid, so a pair can come out a little over
+                const int budget = (int) ((int64_t) va.total_tokens * 97 / 100);
+                const int pairs = std::max(1, (frames_plan + 1) / 2);
+                const int fit = budget / pairs;
+                if (pair_tok <= 0 || fit < pair_tok) pair_tok = fit;
+                if (pair_tok < va.min_pair_tokens) {
+                    pair_tok = va.min_pair_tokens;
+                    frames_plan = std::max(2, 2 * (budget / std::max(1, va.min_pair_tokens)));
                 }
+            }
+            if (vi0.n_frames > frames_plan && vi0.fps > 0) {
+                vp.fps_target = vi0.fps * (float) frames_plan / (float) vi0.n_frames;
+                mtmd_helper_video_free(video);
+                video = mtmd_helper_video_init(ctx, va.video.c_str(), vp);
+            }
+            const float fps = video ? mtmd_helper_video_get_info(video).fps : 0.0f;
+            std::string err, layout;
+            if (!video || fps <= 0) err = "the video could not be read";
+            std::FILE* f = nullptr;
+            if (err.empty() && !(f = std::fopen(va.out.c_str(), "wb"))) err = "cannot write " + va.out;
+            // In batches of 32 pairs: read, tokenize, encode, write, free - an hour-scale video never holds more
+            // than one batch of preprocessed frames.  Per pair "<t seconds>" (the pair's mean time) and two markers
+            // with nothing between them, so mtmd merges exactly 0+1, 2+3, ... (and wraps each merged pair in
+            // <|vision_start|> ... <|vision_end|> itself); an odd last frame is doubled, as the reference pads it.
+            constexpr int kBatchFrames = 64;
+            const std::string marker = mtmd_default_marker();
+            int total = 0, groups = 0, n_frames = 0;
+            bool done = false;
+            while (err.empty() && !done) {
+                std::vector<mtmd_bitmap*> frames;
+                const int room = frames_plan - n_frames;
+                if (room <= 0 || !read_frames(video, std::min(kBatchFrames, room), va.max_side, pair_tok, frames)) {
+                    if (room > 0) err = "the video could not be read";
+                    break;
+                }
+                done = (int) frames.size() < std::min(kBatchFrames, room) || (int) frames.size() == room;
+                if (frames.empty()) break;
+                const int base = n_frames, got = (int) frames.size();
+                n_frames += got;
+                if (got % 2 == 1) {
+                    const mtmd_bitmap* last = frames.back();
+                    mtmd_bitmap* dup = mtmd_bitmap_init(mtmd_bitmap_get_nx(last), mtmd_bitmap_get_ny(last),
+                                                        mtmd_bitmap_get_data(last));
+                    mtmd_bitmap_set_mergeable(dup, true);
+                    frames.push_back(dup);
+                    done = true;
+                }
+                std::string prompt;
+                for (int i = 0; i + 1 < (int) frames.size(); i += 2) {
+                    const int a = base + i, b = base + std::min(i + 1, got - 1);
+                    char ts[48];
+                    std::snprintf(ts, sizeof ts, "<%.1f seconds>", (a + b) / 2.0 / fps);
+                    prompt += ts + marker + marker;
+                }
+                mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+                mtmd_input_text txt{prompt.c_str(), prompt.size(), false, true};
+                if (mtmd_tokenize(ctx, chunks, &txt, frames.data(), frames.size()) != 0)
+                    err = "the video could not be preprocessed";
+                for (size_t c = 0; err.empty() && c < mtmd_input_chunks_size(chunks); ++c) {
+                    const mtmd_input_chunk* ch = mtmd_input_chunks_get(chunks, c);
+                    if (!layout.empty()) layout += ';';
+                    if (mtmd_input_chunk_get_type(ch) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+                        size_t nt = 0;
+                        const llama_token* tk = mtmd_input_chunk_get_tokens_text(ch, &nt);
+                        layout += 'T';
+                        for (size_t j = 0; j < nt; ++j) layout += (j ? "," : "") + std::to_string(tk[j]);
+                    } else if (mtmd_input_chunk_get_type(ch) == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+                        int n = 0, nx = 0, ny = 0;
+                        err = write_record(ctx, ch, n_embd, f, n, nx, ny);
+                        layout += 'I' + std::to_string(n);
+                        total += n;
+                        ++groups;
+                    } else {
+                        err = "the video gave a chunk that is neither text nor image";
+                    }
+                }
+                mtmd_input_chunks_free(chunks);
+                for (mtmd_bitmap* bm : frames) mtmd_bitmap_free(bm);
             }
             if (f) std::fclose(f);
             if (err.empty() && groups == 0) err = "the video has no frames";
@@ -331,9 +368,7 @@ int main(int argc, char** argv) {
             if (err.empty()) std::printf("OK %d %d %d %.0f\nLAYOUT %s\n", total, groups, n_frames, ms, layout.c_str());
             else std::printf("ERR %s\n", err.c_str());
             std::fflush(stdout);
-            mtmd_input_chunks_free(chunks);
-            for (mtmd_bitmap* bm : frames) mtmd_bitmap_free(bm);
-            mtmd_helper_video_free(video);
+            if (video) mtmd_helper_video_free(video);
             continue;
         }
         std::string img, out;

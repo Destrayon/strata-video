@@ -23,6 +23,7 @@ import http.client
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -57,6 +58,22 @@ class Upstream:
         if self.api_key and not any(k.lower() in ("authorization", "x-api-key") for k in headers):
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
+
+    def context(self) -> int:
+        """The server's context in tokens (its /health), 0 when unknown; asked at most once a minute."""
+        now = time.monotonic()
+        if now - getattr(self, "_ctx_at", -1e9) > 60:
+            c = self.conn()
+            try:
+                c.request("GET", "/health", headers=self.auth({}))
+                r = c.getresponse()
+                self._ctx = int(json.loads(r.read() or b"{}").get("max_context") or 0) if r.status == 200 else 0
+            except (OSError, ValueError):
+                self._ctx = 0
+            finally:
+                c.close()
+            self._ctx_at = now
+        return self._ctx
 
     def has(self, bid: str) -> bool:
         c = self.conn()
@@ -114,6 +131,9 @@ class Encoder:
             path, n = self.vision.encode(_image_source(part))
             return {"type": "image_embeddings", "id": self._send("image", path, n)}
         src, opts = _video_source(part)
+        ctx = self.upstream.context()
+        if ctx:
+            self.vision.context = ctx                  # the automatic video budget follows the server's context
         path, n, layout = self.vision.encode_video(src, opts)
         return {"type": "video_embeddings", "id": self._send("video", path, n, layout)}
 

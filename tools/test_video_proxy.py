@@ -43,6 +43,8 @@ class FakeServer(BaseHTTPRequestHandler):
         if self.path.startswith("/v1/strata/embeddings/"):
             bid = self.path.rsplit("/", 1)[1]
             self._send(200 if bid in FakeServer.uploads else 404, {"exists": bid in FakeServer.uploads})
+        elif self.path == "/health":
+            self._send(200, {"status": "ok", "max_context": 262144, "videos": True})
         else:
             self._send(200, raw=b"<html>strata</html>", ctype="text/html")
 
@@ -157,6 +159,11 @@ class Proxy(unittest.TestCase):
                   {"Origin": "https://evil.example"})
         h = [h for m, p, h, b in FakeServer.log if p == "/v1/chat/completions"][-1]
         self.assertEqual(h["Origin"], "https://evil.example")             # anyone else's stays: the server refuses
+
+    def test_video_budget_follows_the_servers_context(self):
+        self.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": [
+            {"type": "video_url", "video_url": {"url": "C:/d.mp4"}}]}]})
+        self.assertEqual(self.vision.context, 262144)                    # from the server's /health
 
     def test_encoder_error_is_a_400(self):
         def boom(source, opts):

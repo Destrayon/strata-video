@@ -68,7 +68,7 @@ VIDEO_PARTS = ("video_url", "input_video", "video", "video_embeddings")
 # strata-video: {"type": "image_embeddings" | "video_embeddings", "id": ...} names a picture or video another PC encoded
 # and uploaded (POST /v1/strata/embeddings); its source becomes this prefix + the id (serve/embeddings.py)
 EMBEDDINGS_REF = "strata-embeddings:"
-VIDEO_OPTIONS = ("fps", "max_frames", "max_side", "tokens")
+VIDEO_OPTIONS = ("fps", "max_frames", "max_side", "tokens", "total_tokens")
 
 # Thinking levels.  The model's template knows low, medium and xhigh (its default; "high" means xhigh), and
 # enable_thinking=false for none.  Clients spell these many ways; everything maps onto those four.
