@@ -174,6 +174,14 @@ class Proxy(unittest.TestCase):
         sent = self.sent("/v1/chat/completions")
         self.assertEqual([s["max_tokens"] for s in sent], [32000, 4512])
 
+    def test_short_answers_skip_thinking(self):
+        msgs = [{"role": "user", "content": "should this be blocked?"}]
+        self.post("/v1/chat/completions", {"model": "m", "max_tokens": 256, "messages": msgs, "tool_choice": "required"})
+        self.post("/v1/chat/completions", {"model": "m", "max_tokens": 256, "messages": msgs, "reasoning_effort": "high"})
+        self.post("/v1/chat/completions", {"model": "m", "max_tokens": 4096, "messages": msgs})
+        sent = self.sent("/v1/chat/completions")
+        self.assertEqual([s.get("reasoning_effort") for s in sent], ["none", "high", None])   # asked for: kept
+
     def test_video_budget_follows_the_servers_context(self):
         self.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": [
             {"type": "video_url", "video_url": {"url": "C:/d.mp4"}}]}]})

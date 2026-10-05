@@ -36,6 +36,9 @@ from serve.frontend import IMAGE_PARTS, VIDEO_PARTS, _image_source, _video_sourc
 
 ENCODED = ("image_embeddings", "video_embeddings")
 REWRITE = ("/v1/chat/completions", "/v1/messages", "/v1/messages/count_tokens", "/v1/responses")
+QUICK_MAX_TOKENS = 1024    # an answer this short has no room to think first (agents' side queries: a forced tool call
+#                            in 256 tokens - with thinking on, a long conversation used them all and no call came)
+REASONING_KEYS = ("reasoning_effort", "reasoning", "enable_thinking", "chat_template_kwargs", "thinking")
 FIT_RE = re.compile(r"exceeds the context \(\d+\).*?at most (\d+) here")   # serve/server.py's prepare() refusal
 HOP = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "proxy-connection", "upgrade",
        "accept-encoding"}
@@ -148,6 +151,14 @@ class Encoder:
         if obj.get("type") in IMAGE_PARTS + VIDEO_PARTS:
             return self.part(obj)
         return {k: (self.rewrite(v) if k in ("messages", "input", "content") else v) for k, v in obj.items()}
+
+
+def quick(req: dict) -> int:
+    """A chat request that allows at most QUICK_MAX_TOKENS and says nothing about thinking -> its limit, else 0."""
+    limit = next((req[k] for k in ("max_tokens", "max_completion_tokens") if isinstance(req.get(k), int)), None)
+    if limit is None or limit > QUICK_MAX_TOKENS or any(k in req for k in REASONING_KEYS):
+        return 0
+    return limit
 
 
 def make_handler(upstream: Upstream, encoder: Encoder, own_origins: set[str], log=None):
@@ -268,7 +279,11 @@ def make_handler(upstream: Upstream, encoder: Encoder, own_origins: set[str], lo
                 try:
                     req = json.loads(body)
                     if isinstance(req, dict):
-                        body = json.dumps(encoder.rewrite(copy.deepcopy(req))).encode()
+                        req = encoder.rewrite(copy.deepcopy(req))
+                        if path == "/v1/chat/completions" and quick(req):
+                            req["reasoning_effort"] = "none"
+                            note(f"POST {path}: a short answer ({quick(req)} tokens): thinking off")
+                        body = json.dumps(req).encode()
                 except json.JSONDecodeError:
                     pass                                # the server says what is wrong with it
                 except ValueError as e:

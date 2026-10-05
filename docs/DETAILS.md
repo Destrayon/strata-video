@@ -1067,7 +1067,10 @@ python tools/video_proxy.py --server http://<server>:8080 --api-key <secret> --c
 
 and open `http://127.0.0.1:8090`. The proxy reads the server's context from its `/health` for the automatic video
 budget; when the server refuses a request only because prompt + `max_tokens` passes the context (agent clients such
-as Qwen Code ask for 32K by habit), it sends it once more with the `max_tokens` the server says fit. `--log FILE`
+as Qwen Code ask for 32K by habit), it sends it once more with the `max_tokens` the server says fit. A chat request that allows 1,024 tokens or fewer and
+says nothing about thinking runs with thinking off: agents' side queries (Qwen Code's permission check: a forced tool
+call in 256 tokens) otherwise spent the whole budget thinking on a long conversation and returned no call
+("Classifier stage 1 unavailable"). `--log FILE`
 writes every request (size, status, time, errors). The server checks that the encodings fit its model (their width, and the encoder
 file's SHA-256 when its config sets `"mmproj_sha256"`); it keeps uploads in `strata-uploads/`, up to 8 GB
 (`"max_upload_gb"`), and a picture or video already uploaded is not sent again.
