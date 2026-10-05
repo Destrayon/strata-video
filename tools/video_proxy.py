@@ -142,15 +142,28 @@ class Encoder:
         path, n, layout = self.vision.encode_video(src, opts)
         return {"type": "video_embeddings", "id": self._send("video", path, n, layout)}
 
-    def rewrite(self, obj):
-        """Every content list in the request (messages, Responses input items, tool results inside them)."""
+    @staticmethod
+    def count_videos(obj) -> int:
         if isinstance(obj, list):
-            return [self.rewrite(x) for x in obj]
+            return sum(Encoder.count_videos(x) for x in obj)
+        if not isinstance(obj, dict):
+            return 0
+        if obj.get("type") in VIDEO_PARTS:
+            return 1
+        return sum(Encoder.count_videos(v) for k, v in obj.items() if k in ("messages", "input", "content"))
+
+    def rewrite(self, obj, top: bool = True):
+        """Every content list in the request (messages, Responses input items, tool results inside them).  The
+        request's videos share the automatic video budget (two videos compared: half each)."""
+        if top:
+            self.vision.videos_in_request = max(1, self.count_videos(obj))
+        if isinstance(obj, list):
+            return [self.rewrite(x, False) for x in obj]
         if not isinstance(obj, dict):
             return obj
         if obj.get("type") in IMAGE_PARTS + VIDEO_PARTS:
             return self.part(obj)
-        return {k: (self.rewrite(v) if k in ("messages", "input", "content") else v) for k, v in obj.items()}
+        return {k: (self.rewrite(v, False) if k in ("messages", "input", "content") else v) for k, v in obj.items()}
 
 
 def quick(req: dict) -> int:

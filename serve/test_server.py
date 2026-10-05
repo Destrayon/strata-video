@@ -357,6 +357,9 @@ class VideoParts(unittest.TestCase):
         v.video["context_share"] = 0.25
         v.context = 65536
         self.assertEqual(v.video_options({})["budget"], 16384)
+        v.videos_in_request = 2                                         # two videos compared share it
+        self.assertEqual(v.video_options({})["budget"], 8192)
+        self.assertEqual(v.video_options({"total_tokens": 5000})["budget"], 5000)
         for bad in ({"fps": "fast"}, {"fps": 100}, {"max_frames": -1}, {"tokens": 99999}, {"total_tokens": -5}):
             with self.assertRaises(ValueError):
                 v.video_options(bad)

@@ -86,6 +86,19 @@ class VideoMcp(unittest.TestCase):
         c = self.watcher.call({"path": str(self.video), "question": "again", "fps": 1, "new_conversation": True})
         self.assertFalse(c["follow_up"])
 
+    def test_compare_labels_each_video(self):
+        other = Path(self.d.name) / "target.webm"
+        other.write_bytes(b"\0")
+        r = self.watcher.call({"paths": [str(other), str(self.video)], "question": "what differs?"})
+        parts = FakeStrata.seen[0]["messages"][0]["content"]
+        self.assertEqual([p.get("text") or p["video_url"]["url"] for p in parts],
+                         ["Video A: target.webm", str(other), "Video B: clip.mp4", str(self.video), "what differs?"])
+        self.assertEqual(r["videos"], [str(other), str(self.video)])
+        self.watcher.call({"paths": [str(other), str(self.video)], "question": "and the HUD?"})
+        self.assertEqual(len(FakeStrata.seen[1]["messages"]), 3)          # a follow-up of the comparison
+        with self.assertRaisesRegex(VM.ToolError, "2-4"):
+            self.watcher.call({"paths": [str(self.video)] * 5, "question": "?"})
+
     def test_bad_arguments_and_refusals_are_tool_errors(self):
         for args, msg in (({"path": str(self.video)}, "required"),
                           ({"path": "Z:/nope.mp4", "question": "?"}, "no such file"),

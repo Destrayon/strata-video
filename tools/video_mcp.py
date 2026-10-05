@@ -37,14 +37,18 @@ INSTRUCTIONS = ("watch_video asks the Strata model about a local video file and 
 TOOL = {
     "name": "watch_video",
     "title": "Watch a video",
-    "description": "Ask the Strata vision model a question about a local video file (any size or length). The model "
-                   "watches the whole video - frames, motion, on-screen text, each moment's time in seconds - and "
-                   "answers in text. Use it instead of reading the video file or extracting frames. Ask follow-up "
-                   "questions about the same path freely: they reuse the video already read.",
+    "description": "Ask the Strata vision model a question about a local video file (any size or length), or compare "
+                   "several: give `paths` and they are shown as Video A, Video B, ... (e.g. target gameplay and our "
+                   "game - ask what differs in HUD, camera, animation, effects, feedback, pacing). The model watches "
+                   "each whole video - frames, motion, on-screen text, each moment's time in seconds - and answers "
+                   "in text. Use it instead of reading video files or extracting frames. Ask follow-up questions "
+                   "about the same path(s) freely: they reuse the videos already read.",
     "inputSchema": {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Absolute path of the video file on this PC"},
+            "paths": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 4,
+                      "description": "Instead of path: 2-4 videos to compare, shown as Video A, B, ... in this order"},
             "question": {"type": "string", "description": "What to find out about the video"},
             "new_conversation": {"type": "boolean", "description": "Start over instead of continuing the "
                                  "conversation about this file (default false)"},
@@ -56,7 +60,7 @@ TOOL = {
             "total_tokens": {"type": "integer", "description": "The whole video's token budget (default: "
                              "automatic, 60% of the model's context)"},
         },
-        "required": ["path", "question"],
+        "required": ["question"],
     },
 }
 
@@ -76,26 +80,35 @@ class Watcher:
     def call(self, args) -> dict:
         if not isinstance(args, dict):
             raise ToolError("arguments must be an object")
-        path, question = args.get("path"), args.get("question")
-        if not isinstance(path, str) or not path.strip() or not isinstance(question, str) or not question.strip():
-            raise ToolError("path and question are required")
-        path = os.path.abspath(os.path.expanduser(path.strip()))
-        if not os.path.isfile(path):
-            raise ToolError(f"no such file: {path}")
-        if not path.lower().endswith(VIDEO_EXT):
-            raise ToolError(f"not a video file (by its extension): {path}")
+        question = args.get("question")
+        paths = args.get("paths") if args.get("paths") else [args.get("path")]
+        if not isinstance(question, str) or not question.strip():
+            raise ToolError("question is required")
+        if not isinstance(paths, list) or not 1 <= len(paths) <= 4 or \
+                not all(isinstance(p, str) and p.strip() for p in paths):
+            raise ToolError("give path (one video) or paths (2-4 videos to compare)")
+        paths = [os.path.abspath(os.path.expanduser(p.strip())) for p in paths]
+        for path in paths:
+            if not os.path.isfile(path):
+                raise ToolError(f"no such file: {path}")
+            if not path.lower().endswith(VIDEO_EXT):
+                raise ToolError(f"not a video file (by its extension): {path}")
         effort = args.get("effort") or "low"
         if effort not in EFFORTS:
             raise ToolError(f"effort must be one of {', '.join(EFFORTS)}")
         opts = {k: args[k] for k in ("fps", "tokens", "total_tokens") if args.get(k) is not None}
-        key = os.path.normcase(path) + json.dumps(opts, sort_keys=True)
+        key = "|".join(os.path.normcase(p) for p in paths) + json.dumps(opts, sort_keys=True)
         with self.lock:
             if args.get("new_conversation"):
                 self.chats.pop(key, None)
             history = list(self.chats.get(key, []))
         if not history:
-            history = [{"role": "user", "content": [{"type": "video_url", "video_url": {"url": path, **opts}},
-                                                    {"type": "text", "text": question.strip()}]}]
+            content = []
+            for i, path in enumerate(paths):
+                if len(paths) > 1:                     # labelled, so the question and answer can name them
+                    content.append({"type": "text", "text": f"Video {chr(65 + i)}: {os.path.basename(path)}"})
+                content.append({"type": "video_url", "video_url": {"url": path, **opts}})
+            history = [{"role": "user", "content": content + [{"type": "text", "text": question.strip()}]}]
         else:
             history.append({"role": "user", "content": question.strip()})
         body = {"model": "strata", "messages": history, "reasoning_effort": effort, "max_tokens": 4096}
@@ -119,7 +132,7 @@ class Watcher:
         with self.lock:
             self.chats[key] = history + [{"role": "assistant", "content": answer}]
         usage = out.get("usage") or {}
-        return {"answer": answer, "video": path, "follow_up": len(history) > 1,
+        return {"answer": answer, "videos": paths, "follow_up": len(history) > 1,
                 "prompt_tokens": usage.get("prompt_tokens"), "seconds": round(time.monotonic() - t0, 1)}
 
 

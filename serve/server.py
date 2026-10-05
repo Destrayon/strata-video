@@ -1438,6 +1438,7 @@ class Vision:
                 o[k] = v
         ctx = int(getattr(self, "context", 0) or 0)
         auto = min(VIDEO_MAX_TOTAL, int(ctx * float(o["context_share"]))) if ctx > 0 else VIDEO_FALLBACK_TOTAL
+        auto //= max(1, int(getattr(self, "videos_in_request", 1) or 1))   # videos sent together share it
         o["budget"] = int(o["total_tokens"]) if int(o["total_tokens"] or 0) > 0 else auto
         return o
 
@@ -2267,6 +2268,8 @@ class Service:
             # same FIFO as the requests.
             if videos and getattr(self.engine, "max_context", 0) > 0:
                 self.vision.context = self.engine.max_context   # a video's automatic budget follows the context
+            if videos:
+                self.vision.videos_in_request = len(videos)    # ... and is shared by the request's videos
             with self.fifo:
                 encoded = [self.vision.encode(src) for src in images]
                 encoded_v = [self.vision.encode_video(src, opts) for src, opts in videos]

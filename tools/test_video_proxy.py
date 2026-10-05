@@ -182,6 +182,15 @@ class Proxy(unittest.TestCase):
         sent = self.sent("/v1/chat/completions")
         self.assertEqual([s.get("reasoning_effort") for s in sent], ["none", "high", None])   # asked for: kept
 
+    def test_videos_in_one_request_share_the_budget(self):
+        self.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Video A:"}, {"type": "video_url", "video_url": {"url": "C:/target.mp4"}},
+            {"type": "text", "text": "Video B:"}, {"type": "video_url", "video_url": {"url": "C:/ours.mp4"}},
+            {"type": "text", "text": "What differs?"}]}]})
+        self.assertEqual(self.vision.videos_in_request, 2)
+        self.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(self.vision.videos_in_request, 1)
+
     def test_video_budget_follows_the_servers_context(self):
         self.post("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": [
             {"type": "video_url", "video_url": {"url": "C:/d.mp4"}}]}]})
