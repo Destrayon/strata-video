@@ -996,7 +996,10 @@ A request can set `fps`, `max_frames`, `tokens`, `total_tokens` and `max_side` f
 The 10-minute video (20 scenes of 30 s, a 2-second "BOSS SPAWNED" banner at 7:13) asked through the video proxy on the
 RTX 2080 Ti server (IQ3_S, 64K context), thinking off: "SCENE 15 is shown ... at 7:20" (right) and the banner "appears
 at 7:13 and lasts for 3 seconds" (2 in truth) - one request of 38,589 prompt tokens, 68 s in all (encoding, upload and
-reading at 909 tokens/s), the follow-up 2.9 s from the conversation cache.
+reading at 909 tokens/s), the follow-up 2.9 s from the conversation cache. The same server at a 256K context: the
+whole video at 2 fps (157,124 prompt tokens), both answers right including the banner's 2 seconds - 328 s for the
+first (encoding ~70 s, reading at 663 tokens/s), 5.5 s for the follow-up. For speed over detail, a request can ask for
+less (`"total_tokens": 40000`).
 
 **Reading text** (HUDs, subtitles, signs), measured on a 12-second 1080p clip drawn for it: a busy background, a
 20 px HUD (`HP 87 AMMO 23/90`, changing to `HP 41 AMMO 7/90` at 6 s), an 18 px sign, three 28 px subtitles changing
